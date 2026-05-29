@@ -37,6 +37,19 @@ DEFAULT_STALE_DAYS = 30.0          # candidate for pruning beyond this age
 DEFAULT_CONFIDENCE_FLOOR = 0.35    # below this (and unused) = prunable
 MIN_CLUSTER_SIZE = 2               # need >=2 overlapping to propose an umbrella
 
+# Cosine-similarity threshold for SEMANTIC clustering (when an embedding model is
+# available). Calibrated against the real model (all-MiniLM-L6-v2) on procedural
+# learnings:
+#   same-domain / rephrased lessons   ~0.73-0.74   (e.g. two pytest tips)
+#   related concept, different tool   ~0.37-0.48   (venv↔poetry, rg↔ag)
+#   genuinely unrelated               ≤0.09        (rg↔traceback, pytest↔css)
+# 0.45 catches same-domain + closely-related pairs while sitting ~5x above the
+# unrelated ceiling. Clustering only PROPOSES — the LLM consolidator is the real
+# gate and can decline a bad grouping (return None) — so we err toward recall here
+# rather than a high-precision cutoff. Override with KOMI_CLUSTER_THRESHOLD.
+import os as _os
+DEFAULT_CLUSTER_THRESHOLD = float(_os.environ.get("KOMI_CLUSTER_THRESHOLD", "0.45"))
+
 
 @dataclass
 class ClusterProposal:
@@ -55,6 +68,7 @@ class CurationReport:
     clusters: list[ClusterProposal] = field(default_factory=list)
     consolidated: list[dict] = field(default_factory=list)  # {umbrella, absorbed:[ids]}
     skipped_protected: int = 0
+    cluster_mode: str = "lexical"                           # "semantic" | "lexical"
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -112,22 +126,42 @@ def is_prunable(lng: Learning, *, stale_days: float, confidence_floor: float) ->
     return _age_days(lng) > stale_days
 
 
-# ── clustering (deterministic) ──────────────────────────────────────────────
+# ── clustering ───────────────────────────────────────────────────────────────
 
 _STOP_PREFIX = {"the", "a", "an", "use", "fix", "run", "how", "to", "in", "on", "for"}
 
 
-def cluster(learnings: list[Learning]) -> list[ClusterProposal]:
+def _cluster_candidates(learnings: list[Learning]) -> list[Learning]:
+    """The learnings eligible for umbrella consolidation: active, procedural (the
+    ones that become skills — identity/semantic facts aren't umbrella-able), and
+    not protected. Sorted by id for deterministic clustering output."""
+    cands = [l for l in learnings
+             if l.type == "procedural" and l.lifecycle.state == "active"
+             and not _is_protected(l)]
+    return sorted(cands, key=lambda l: l.id)
+
+
+def cluster(learnings: list[Learning], *, embedder=None,
+            threshold: float = DEFAULT_CLUSTER_THRESHOLD) -> list[ClusterProposal]:
     """Group procedural learnings that plausibly cover the same class of task.
 
-    Cheap + deterministic (no embeddings in v1): two signals form a cluster —
-    a shared first significant title word, or a shared tag. We only cluster
-    *procedural* learnings (those that become skills); identity/semantic facts
-    aren't umbrella-able. Protected learnings are excluded from clustering."""
-    candidates = [l for l in learnings
-                  if l.type == "procedural" and l.lifecycle.state == "active"
-                  and not _is_protected(l)]
+    Semantic-first (mirrors recall): when an ``embedder`` is supplied, cluster by
+    MEANING (cosine similarity) so lessons that overlap conceptually but share no
+    title word or tag — e.g. "Prefer ripgrep over grep -r" and "Use ag for fast
+    code search" — are caught. Without an embedder (zero-dep install, or the model
+    disabled/absent) fall back to the cheap lexical signals: a shared first
+    significant title word, or a shared tag. Either way only *procedural*,
+    non-protected, active learnings are considered."""
+    candidates = _cluster_candidates(learnings)
+    if embedder is not None:
+        sem = _cluster_semantic(candidates, embedder, threshold)
+        if sem is not None:
+            return sem
+    return _cluster_lexical(candidates)
 
+
+def _cluster_lexical(candidates: list[Learning]) -> list[ClusterProposal]:
+    """Deterministic, zero-dependency clustering on shared title-word / tag."""
     buckets: dict[str, list[Learning]] = {}
     for l in candidates:
         for key in _cluster_keys(l):
@@ -139,7 +173,7 @@ def cluster(learnings: list[Learning]) -> list[ClusterProposal]:
     # the largest, and don't let one learning anchor two reported clusters.
     proposals = [ClusterProposal(k, m) for k, m in buckets.items()
                  if len(m) >= MIN_CLUSTER_SIZE]
-    proposals.sort(key=lambda p: p.size, reverse=True)
+    proposals.sort(key=lambda p: (p.size, p.key), reverse=True)
     seen_ids: set[str] = set()
     out: list[ClusterProposal] = []
     for p in proposals:
@@ -150,13 +184,62 @@ def cluster(learnings: list[Learning]) -> list[ClusterProposal]:
     return out
 
 
+def _embed_text(l: Learning) -> str:
+    """The text a learning is embedded from. MUST match Store.embed_pending's join
+    so on-the-fly vectors here are comparable to the store's persisted ones."""
+    return " \n ".join(filter(None, [l.title, l.body, l.trigger, " ".join(l.tags or [])]))
+
+
+def _cluster_semantic(candidates: list[Learning], embedder,
+                      threshold: float) -> Optional[list[ClusterProposal]]:
+    """Greedy, deterministic, seed-based clustering by cosine similarity.
+
+    For each not-yet-clustered learning (in stable id order) we open a cluster and
+    pull in every other unclustered learning whose similarity to the SEED is
+    >= threshold. Seed-anchored (not full transitive closure) so one borderline
+    link can't chain unrelated lessons into a runaway megacluster, and so the
+    output is stable across runs. Returns None on any embedding failure so the
+    caller falls back to lexical — never raises into a curation pass."""
+    from .embed import cosine
+    try:
+        vecs: list[list[float]] = [embedder.encode(_embed_text(l)) for l in candidates]
+    except Exception:
+        return None
+    if any(not v for v in vecs):
+        return None  # an empty vector means the model didn't really encode → fall back
+
+    used = [False] * len(candidates)
+    out: list[ClusterProposal] = []
+    for i, seed in enumerate(candidates):
+        if used[i]:
+            continue
+        members = [seed]
+        member_idx = [i]
+        for j in range(i + 1, len(candidates)):
+            if used[j]:
+                continue
+            if cosine(vecs[i], vecs[j]) >= threshold:
+                members.append(candidates[j])
+                member_idx.append(j)
+        if len(members) >= MIN_CLUSTER_SIZE:
+            for k in member_idx:
+                used[k] = True
+            # key = the seed's first significant title word, for a readable report
+            key = next((f"w:{w}" for w in _title_words(seed)), f"sem:{seed.id[:12]}")
+            out.append(ClusterProposal(key, members))
+    return out
+
+
+def _title_words(l: Learning) -> list[str]:
+    return [w for w in (l.title or "").lower().replace("-", " ").split()
+            if w.isalnum() and w not in _STOP_PREFIX and len(w) >= 3]
+
+
 def _cluster_keys(l: Learning) -> list[str]:
     keys: list[str] = []
-    words = [w for w in (l.title or "").lower().replace("-", " ").split() if w.isalnum()]
-    for w in words:
-        if w not in _STOP_PREFIX and len(w) >= 3:
-            keys.append(f"w:{w}")
-            break
+    for w in _title_words(l):
+        keys.append(f"w:{w}")
+        break
     for t in (l.tags or [])[:3]:
         keys.append(f"t:{t.strip().lower()}")
     return keys
@@ -170,11 +253,23 @@ def curate(
     consolidator: Optional[ConsolidateLLM] = None,
     stale_days: float = DEFAULT_STALE_DAYS,
     confidence_floor: float = DEFAULT_CONFIDENCE_FLOOR,
+    embedder=None,
     dry_run: bool = False,
 ) -> CurationReport:
     """Run one curation pass. Deterministic pruning always; LLM consolidation only
-    if a ``consolidator`` is given. ``dry_run`` reports without mutating."""
+    if a ``consolidator`` is given. ``dry_run`` reports without mutating.
+
+    Clustering is semantic when an embedding model is available: ``embedder`` is
+    resolved from :func:`engine.embed.get_embedder` unless one is passed in (tests
+    inject a mock). Falls back to lexical clustering when absent — same zero-dep
+    guarantee as recall."""
     rep = CurationReport()
+    if embedder is None:
+        try:
+            from .embed import get_embedder
+            embedder = get_embedder()
+        except Exception:
+            embedder = None
     try:
         learnings = store.all()
     except Exception as e:
@@ -197,8 +292,9 @@ def curate(
     survivors = [l for l in (store.all() if not dry_run else learnings)
                  if l.lifecycle.state == "active"]
 
-    # 2. CONSOLIDATE (LLM, optional)
-    rep.clusters = cluster(survivors)
+    # 2. CONSOLIDATE (LLM, optional). Cluster by meaning when a model is present.
+    rep.clusters = cluster(survivors, embedder=embedder)
+    rep.cluster_mode = "semantic" if embedder is not None else "lexical"
     if consolidator is not None:
         for cl in rep.clusters:
             try:
@@ -299,7 +395,7 @@ def render_report(rep: CurationReport) -> str:
             lines.append(f"- **{c['umbrella']}** ← absorbed {len(c['absorbed'])} learning(s)")
         lines.append("")
     if rep.clusters and not rep.consolidated:
-        lines.append("## Clusters flagged (not merged — no LLM this run)")
+        lines.append(f"## Clusters flagged (not merged — no LLM this run) [{rep.cluster_mode}]")
         for cl in rep.clusters:
             titles = ", ".join(m.title for m in cl.members[:5])
             lines.append(f"- `{cl.key}` ({cl.size}): {titles}")

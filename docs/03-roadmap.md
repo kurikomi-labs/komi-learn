@@ -34,7 +34,15 @@
   (no re-signing); the vendored CI verifier counts corroboration in lockstep
   (parity-tested). No new dependencies. `pool/corroboration.py`, `engine/recall.py`,
   `engine/store.py` (corroboration column), `tests/test_corroboration.py`.
-- 🔜 Embedding-based *clustering* in the curator (better umbrella detection).
+- ✅ **Embedding-based clustering (done).** When the embedding model is present the
+  curator clusters procedural learnings by *meaning* (cosine ≥ threshold, calibrated
+  ~0.45 against the real model) instead of shared title-word/tag — so conceptually
+  related lessons that share no surface form (e.g. "ripgrep" vs "ag" for code search)
+  get proposed for the same umbrella. Deterministic greedy seed-based grouping;
+  lexical clustering stays as the zero-dep fallback; the LLM consolidator remains the
+  real merge gate. `engine/curator.py` (`_cluster_semantic`), `tests/test_semantic_clustering.py`.
+
+**Phase 5 is complete.** ✅ Semantic recall · ✅ Corroboration trust · ✅ Semantic clustering.
 
 **Phase 6 — Second host adapter** *(proves "works for every agent")*
 - A non–Claude-Code adapter (Codex, or a chat UI) behind the same two-method interface (`recall()` + `on_session_end()`). The real test that the substrate isn't Claude-specific.

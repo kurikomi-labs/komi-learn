@@ -26,6 +26,15 @@ def run_curate(*, cwd: str = "", dry_run: bool = False, use_llm: bool = True):
     """Run a curation pass over the personal (and project) store, write the report,
     and return the CurationReport. Safe to call directly (the CLI does) or from a
     detached worker (the cadence trigger does)."""
+    # Honor the user's recall.semantic preference here too: the detached curate
+    # worker is a fresh process that didn't see the recall hook's env export, so
+    # without this a user who disabled semantic would still get semantic clustering.
+    try:
+        from ..hooklib import _apply_semantic_pref
+        _apply_semantic_pref(paths)
+    except Exception:
+        pass
+
     consolidator = None
     if use_llm:
         try:
