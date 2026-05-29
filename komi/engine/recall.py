@@ -68,11 +68,12 @@ def _recency_score(updated_at: str, *, half_life_days: float = 30.0) -> float:
     return 0.5 ** (age_days / half_life_days)
 
 
-def _rank_score(row, fts_rank: float) -> float:
+def _rank_score(row, similarity: float) -> float:
     """Blend of four signals: 0.4·similarity + 0.3·salience + 0.2·recency + 0.1·depth.
 
-    Similarity (relevance to the current context) dominates by design — it's the
-    signal that should decide what surfaces, not raw popularity.
+    ``similarity`` is already normalized to (0,1] by the caller — cosine similarity
+    for semantic recall, or a squashed bm25 score for keyword fallback. Similarity
+    (relevance to the current context) dominates by design.
 
     Anti-popularity-bias: salience uses a LOG-DAMPENED reuse term, not linear. The
     old ``confidence·(1+reused)`` created a rich-get-richer loop (surfaced → marked
@@ -80,12 +81,40 @@ def _rank_score(row, fts_rank: float) -> float:
     hits" and starving newer/rarer-but-relevant learnings. log1p flattens the curve
     so reuse is a gentle nudge, not a runaway multiplier — relevance still wins.
     """
-    similarity = 1.0 / (1.0 + math.exp(fts_rank))           # squash bm25 into (0,1)
     reuse = max(0, row["reused"] or 0)
     salience = min(1.0, (row["confidence"] or 0.0) * (1.0 + 0.5 * math.log1p(reuse)))
     recency = _recency_score(row["updated_at"] or "")
     depth = min(1.0, (row["confidence"] or 0.0))
-    return 0.4 * similarity + 0.3 * salience + 0.2 * recency + 0.1 * depth
+    return 0.4 * max(0.0, similarity) + 0.3 * salience + 0.2 * recency + 0.1 * depth
+
+
+def _candidate_hits(store: Store, query: str, *, limit: int, scopes):
+    """Return [(row, similarity)] candidates, semantic-first with keyword fallback.
+
+    If an embedding model is available, embed any pending learnings, embed the
+    query, and rank by cosine similarity. Otherwise (zero-dep install, or model not
+    yet downloaded) fall back to keyword FTS and squash bm25 into a (0,1] similarity.
+    Either way the downstream ranking is identical."""
+    try:
+        from .embed import get_embedder
+        embedder = get_embedder()
+    except Exception:
+        embedder = None
+
+    if embedder is not None:
+        try:
+            store.embed_pending(embedder)               # backfill missing vectors
+            qvec = embedder.encode(query)
+            if qvec:
+                rows = store.vector_search(qvec, limit=limit, scopes=scopes)
+                if rows:
+                    return [(r, max(0.0, r.get("sim", 0.0))) for r in rows]
+        except Exception:
+            pass  # any failure → fall through to keyword
+
+    # keyword fallback
+    hits = store.search(query, limit=limit, scopes=scopes)
+    return [(h, 1.0 / (1.0 + math.exp(h["rank"]))) for h in hits]
 
 
 def recall(
@@ -120,16 +149,20 @@ def recall(
     ])) or " ".join(r["title"] for r in rows[:10])  # cold start: use what we have
 
     scopes = None if cfg.include_global else [Scope.PERSONAL.value, Scope.PROJECT.value]
-    hits = store.search(query, limit=cfg.k * 3, scopes=scopes)
+
+    # Semantic-first: rank candidates by MEANING when an embedding model is present
+    # (a lesson about "test suites" surfaces for "unit tests"), else fall back to
+    # keyword FTS. Each candidate carries a normalized similarity in (0,1].
+    candidates = _candidate_hits(store, query, limit=cfg.k * 3, scopes=scopes)
 
     # Rank the JIT candidates (exclude identity — it's always shown separately).
     scored = []
-    for h in hits:
+    for h, similarity in candidates:
         if h["type"] == "identity":
             continue
         if (h["confidence"] or 0) < cfg.min_confidence:
             continue
-        scored.append((_rank_score(h, h["rank"]), h))
+        scored.append((_rank_score(h, similarity), h))
     scored.sort(key=lambda x: x[0], reverse=True)
 
     # Select top-k, but (a) dedup by id and (b) cap how many untrusted community

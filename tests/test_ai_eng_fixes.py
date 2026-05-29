@@ -31,9 +31,9 @@ def test_reuse_is_log_dampened_not_linear():
         pass
     def row(conf, reused):
         return {"confidence": conf, "reused": reused, "updated_at": ""}
-    # same FTS rank; the only difference is reuse
-    s_new = _rank_score(row(0.5, 0), fts_rank=0.0)
-    s_used = _rank_score(row(0.5, 50), fts_rank=0.0)
+    # same similarity; the only difference is reuse
+    s_new = _rank_score(row(0.5, 0), 0.5)
+    s_used = _rank_score(row(0.5, 50), 0.5)
     # reuse helps, but the gap is bounded (log), not 51x linear
     assert s_used > s_new
     assert (s_used - s_new) < 0.25       # would be huge under the old linear formula

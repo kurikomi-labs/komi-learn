@@ -173,9 +173,17 @@ Personal learnings live under `~/.claude/komi/`; project learnings under
 **Optional power-ups** (zero code change — the engine detects them):
 
 ```bash
+pip install komi-learn[smart] # semantic (meaning-based) recall via a local model
 pip install blake3 pynacl     # real BLAKE3 ids + Ed25519 pool signatures
 pip install anthropic         # real LLM distillation/classification
 ```
+
+**Semantic recall** (`[smart]`): by default komi-learn finds past learnings by
+*meaning*, not just keywords — a lesson about "test suites" surfaces when you're
+working on "unit tests". It uses a local embedding model (one `pip install`,
+~hundreds of MB, then fully offline, no API key). **Without it, recall falls back
+to keyword search automatically** — nothing breaks, it's just less semantic.
+`komi-learn doctor` shows which mode is active.
 
 Tune cadence with `KOMI_NUDGE_TURNS` (default 8) and the model with
 `KOMI_DISTILL_MODEL`.

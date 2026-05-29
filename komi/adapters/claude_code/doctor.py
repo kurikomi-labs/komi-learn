@@ -63,7 +63,22 @@ def run_doctor() -> list[Check]:
     # 7. learnings present
     checks.append(_check_learnings())
 
+    # 8. recall mode — semantic (smart) vs keyword fallback. Never a failure.
+    checks.append(_check_recall_mode())
+
     return checks
+
+
+def _check_recall_mode() -> Check:
+    try:
+        from ...engine.embed import available
+        if available():
+            return Check("recall", "pass", "semantic (meaning-based) recall active")
+    except Exception:
+        pass
+    return Check("recall", "pass",
+                 "keyword recall (semantic not installed — works fine; smarter with it)",
+                 "Enable meaning-based recall:  pip install komi-learn[smart]")
 
 
 def _check_hooks() -> Check:

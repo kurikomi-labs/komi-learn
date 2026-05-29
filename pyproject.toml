@@ -22,8 +22,12 @@ dependencies = []
 crypto = ["blake3>=0.4", "pynacl>=1.5"]
 # Real LLM-backed distillation/classification in the Claude Code adapter.
 llm = ["anthropic>=0.40"]
+# Semantic (meaning-based) recall via a local embedding model. ~100-500MB download
+# on first install; fully offline after, no API key. Without it, recall falls back
+# to keyword search automatically — nothing breaks.
+smart = ["sentence-transformers>=2.2"]
 # Everything.
-full = ["blake3>=0.4", "pynacl>=1.5", "anthropic>=0.40"]
+full = ["blake3>=0.4", "pynacl>=1.5", "anthropic>=0.40", "sentence-transformers>=2.2"]
 dev = ["pytest>=8"]
 
 [project.scripts]

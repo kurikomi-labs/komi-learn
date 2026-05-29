@@ -289,7 +289,8 @@ class Store:
                 title TEXT, body TEXT, trigger TEXT, tags TEXT,
                 confidence REAL, reused INTEGER DEFAULT 0,
                 last_used TEXT, state TEXT DEFAULT 'active',
-                source TEXT, origin_root TEXT, updated_at TEXT
+                source TEXT, origin_root TEXT, updated_at TEXT,
+                embedding BLOB, embed_version TEXT
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS learnings_fts USING fts5(
                 title, body, trigger, tags,
@@ -312,8 +313,79 @@ class Store:
             END;
             """
         )
+        # Migrate older index.db files that predate the embedding columns.
+        cols = {r[1] for r in db.execute("PRAGMA table_info(learnings)")}
+        if "embedding" not in cols:
+            db.execute("ALTER TABLE learnings ADD COLUMN embedding BLOB")
+        if "embed_version" not in cols:
+            db.execute("ALTER TABLE learnings ADD COLUMN embed_version TEXT")
         db.commit()
         return db
+
+    # ── embeddings (semantic recall) ────────────────────────────────────
+
+    @staticmethod
+    def _pack_vec(vec: list[float]) -> bytes:
+        import struct
+        return struct.pack(f"<{len(vec)}f", *vec)
+
+    @staticmethod
+    def _unpack_vec(blob) -> list[float]:
+        import struct
+        if not blob:
+            return []
+        n = len(blob) // 4
+        return list(struct.unpack(f"<{n}f", blob))
+
+    def embed_pending(self, embedder) -> int:
+        """Compute + store embeddings for active rows missing one (or stale version).
+        Called lazily before semantic recall and after distill. Returns count embedded.
+        Best-effort: a single encode failure skips that row, never raises."""
+        if embedder is None:
+            return 0
+        ver = getattr(embedder, "version", "?")
+        rows = self._db.execute(
+            "SELECT id, title, body, trigger, tags FROM learnings "
+            "WHERE state='active' AND (embedding IS NULL OR embed_version IS NOT ? OR embed_version != ?)",
+            (ver, ver),
+        ).fetchall()
+        n = 0
+        for r in rows:
+            text = " \n ".join(filter(None, [r["title"], r["body"], r["trigger"], r["tags"]]))
+            try:
+                vec = embedder.encode(text)
+            except Exception:
+                vec = []
+            if not vec:
+                continue
+            self._db.execute("UPDATE learnings SET embedding=?, embed_version=? WHERE id=?",
+                             (self._pack_vec(vec), ver, r["id"]))
+            n += 1
+        if n:
+            self._db.commit()
+        return n
+
+    def vector_search(self, query_vec: list[float], *, limit: int = 20,
+                      scopes: Optional[list[str]] = None) -> list:
+        """Rank active learnings by cosine similarity to ``query_vec``. Returns rows
+        with an added ``sim`` float (1.0 = identical). Pure-Python cosine over the
+        candidate set — fine for the thousands-of-learnings scale this targets."""
+        from .embed import cosine
+        if not query_vec:
+            return []
+        sql = "SELECT * FROM learnings WHERE state='active' AND embedding IS NOT NULL"
+        params: list = []
+        if scopes:
+            sql += " AND scope IN (%s)" % ",".join("?" * len(scopes))
+            params += scopes
+        scored = []
+        for r in self._db.execute(sql, params):
+            sim = cosine(query_vec, self._unpack_vec(r["embedding"]))
+            d = dict(r)
+            d["sim"] = sim
+            scored.append(d)
+        scored.sort(key=lambda d: d["sim"], reverse=True)
+        return scored[:limit]
 
     def _index_one(self, lng: Learning, *, source: str) -> None:
         self._db.execute(
