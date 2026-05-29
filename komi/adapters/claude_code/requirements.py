@@ -58,15 +58,17 @@ def verify_model(*, api_key: Optional[str] = None) -> Requirement:
     Order matches build_llm: try OAuth (claude CLI) first, then API key. We do an
     actual tiny completion — a valid login that can't reach the model still FAILS
     here, which is the whole point (it caught exactly that gap in testing)."""
+    logged_in = False
     # 1. OAuth via the claude CLI
     try:
         from .llm_cli import ClaudeCLILLM
         cli = ClaudeCLILLM()
         if cli.available and cli.probe().ok:
+            logged_in = True
             ok, detail = cli.test_call()
             if ok:
                 return Requirement("model", True, True,
-                                   f"OAuth via {cli.probe().summary()} — verified ({detail})")
+                                   f"{cli.probe().summary()} — verified ({detail})")
             # logged in but the call failed — report honestly, keep trying API key
             oauth_detail = f"OAuth login present but model call failed: {detail}"
         else:
@@ -89,14 +91,24 @@ def verify_model(*, api_key: Optional[str] = None) -> Requirement:
     except Exception as e:
         api_detail = f"API check error: {e}"
 
-    return Requirement(
-        "model", False, True,
-        f"no working model path ({oauth_detail}; {api_detail})",
-        "Choose ONE:\n"
-        "        • free OAuth (uses your Claude.ai subscription):  claude auth login\n"
-        "        • API key:  komi-learn install --api-key sk-ant-...\n"
-        "        then re-run:  komi-learn install",
-    )
+    # Context-aware fix: don't tell an already-logged-in user to log in.
+    if logged_in:
+        fix = (
+            "You ARE logged in, but the model call didn't return. This usually means\n"
+            "        the call is blocked in the current context (e.g. a sandbox/CI shell),\n"
+            "        not a login problem. Try again from your normal terminal, or use a\n"
+            "        key:  komi-learn install --api-key sk-ant-...   then re-run install."
+        )
+        detail_msg = f"logged in, but model call failed ({oauth_detail}; {api_detail})"
+    else:
+        fix = (
+            "Choose ONE, then re-run  komi-learn install :\n"
+            "        • free OAuth (uses your Claude.ai subscription):  claude auth login\n"
+            "        • API key:  komi-learn install --api-key sk-ant-..."
+        )
+        detail_msg = f"no working model path ({oauth_detail}; {api_detail})"
+
+    return Requirement("model", False, True, detail_msg, fix)
 
 
 def check_git() -> Requirement:

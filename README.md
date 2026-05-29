@@ -103,11 +103,16 @@ login that can't actually reach the model is reported as a failure, not a false 
 
 ## Install for Claude Code (one command)
 
+If you already use Claude Code, you're **already logged in** — just install:
+
 ```bash
 pip install komi-learn        # (today: pip install -e . from this repo)
-claude auth login             # free OAuth distillation (or use --api-key below)
 komi-learn install            # verify requirements + set everything up
 ```
+
+Only if `komi-learn install` reports the model check failing because you're *not*
+logged in do you need `claude auth login` (or pass `--api-key sk-ant-...`). Already
+on Claude Code? Skip it — your existing subscription login is used automatically.
 
 That single `komi-learn install`:
 - **verifies all requirements first** (and stops with exact fixes if any is unmet),
