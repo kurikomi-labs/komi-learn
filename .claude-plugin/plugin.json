@@ -1,0 +1,8 @@
+{
+  "name": "komi-learn",
+  "description": "A continuous, zero-friction learning layer: the agent learns about you and improves its own skills across every session, and can share anonymized, provenance-verified learnings to a global pool. Inspired by Hermes Agent.",
+  "version": "0.1.0",
+  "author": { "name": "kurikomi-labs" },
+  "homepage": "https://github.com/kurikomi-labs/komi-learn",
+  "license": "MIT"
+}
