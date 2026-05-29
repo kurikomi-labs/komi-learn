@@ -244,7 +244,12 @@ def _build_umbrella(merged: dict, members: list[Learning]) -> Learning:
               else members[0].scope,
         confidence=min(1.0, conf),
     )
-    return u.finalize()
+    u.finalize()
+    # Record lineage: which learnings were folded in. (Provenance, not content, so
+    # it doesn't affect the content-addressed id — set after finalize.) Makes the
+    # consolidation traceable/reversible, mirroring the PAM derivation DAG.
+    u.provenance.parent_ids = [m.id for m in members]
+    return u
 
 
 # ── report rendering ────────────────────────────────────────────────────────

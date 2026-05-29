@@ -129,27 +129,19 @@ def _maybe_sync_pool() -> None:
 
 
 def _sync_due(hours: float) -> bool:
-    """Throttle pool syncs using a timestamp in state.json. Returns True (and
-    records 'now') when at least *hours* have elapsed since the last sync."""
+    """Throttle pool syncs via an atomic+locked state update (concurrent sessions
+    safe). Returns True (and records 'now') when >= *hours* since the last sync."""
     import time
-    sp = paths.state_path()
-    state = {}
-    try:
-        if sp.exists():
-            state = json.loads(sp.read_text(encoding="utf-8"))
-    except Exception:
-        state = {}
-    last = float(state.get("pool_last_sync", 0) or 0)
     now = time.time()
-    if now - last < hours * 3600:
-        return False
-    state["pool_last_sync"] = now
-    try:
-        sp.parent.mkdir(parents=True, exist_ok=True)
-        sp.write_text(json.dumps(state), encoding="utf-8")
-    except Exception:
-        pass
-    return True
+
+    def _mut(state: dict) -> bool:
+        last = float(state.get("pool_last_sync", 0) or 0)
+        if now - last < hours * 3600:
+            return False
+        state["pool_last_sync"] = now
+        return True
+
+    return bool(paths.update_state(_mut))
 
 
 def run_sync() -> None:

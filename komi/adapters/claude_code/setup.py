@@ -162,10 +162,19 @@ def _install_hooks() -> StepResult:
         sp.parent.mkdir(parents=True, exist_ok=True)
         data = {}
         if sp.exists():
-            data = json.loads(sp.read_text(encoding="utf-8"))
-            # back up once per install
+            # back up BEFORE parsing so a corrupt file is preserved, not lost.
             bak = sp.with_suffix(".json.komi-bak")
             shutil.copy2(sp, bak)
+            try:
+                data = json.loads(sp.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as e:
+                # Refuse to overwrite a file we can't parse — clear, specific fix.
+                return StepResult("hooks", False,
+                                  f"~/.claude/settings.json is not valid JSON: {e}",
+                                  fix=f"Repair the JSON (a backup is at {bak.name}), then re-run komi-learn install.")
+            if not isinstance(data, dict):
+                return StepResult("hooks", False, "settings.json is not a JSON object",
+                                  fix="Fix settings.json to be a JSON object, then re-run.")
         hooks = data.setdefault("hooks", {})
         added, refreshed = [], []
         for event in HOOK_EVENTS:
@@ -188,7 +197,9 @@ def _install_hooks() -> StepResult:
                 # path) gets upgraded to the canonical absolute-interpreter form.
                 existing["command"] = want
                 refreshed.append(event)
-        sp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        if not _atomic_write_json(sp, data):
+            return StepResult("hooks", False, "failed to write a valid settings.json",
+                              fix=f"Check permissions on {sp}; a backup is at {sp.name}.komi-bak")
         detail = f"hooks set for {', '.join(HOOK_EVENTS)}"
         bits = []
         if added:
@@ -200,6 +211,27 @@ def _install_hooks() -> StepResult:
     except Exception as e:
         return StepResult("hooks", False, str(e),
                           fix=f"Manually add a SessionStart hook running: {_hook_command(_HOOK_MODULES['SessionStart'])}")
+
+
+def _atomic_write_json(path: Path, data: dict) -> bool:
+    """Write JSON atomically (temp + os.replace) and verify it parses back. Returns
+    False if the write or read-back fails, so callers never claim success on a
+    half-written or corrupt settings.json."""
+    import tempfile
+    try:
+        text = json.dumps(data, indent=2)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        json.loads(path.read_text(encoding="utf-8"))   # verify
+        return True
+    except Exception:
+        return False
 
 
 def _write_config(*, pool_repo_url: Optional[str], nudge_turns: int) -> StepResult:
@@ -272,7 +304,12 @@ def uninstall(*, keep_data: bool = True) -> InstallReport:
     sp = settings_path()
     try:
         if sp.exists():
-            data = json.loads(sp.read_text(encoding="utf-8"))
+            try:
+                data = json.loads(sp.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as e:
+                rep.add("hooks", False, f"settings.json is invalid JSON: {e}",
+                        fix="Repair it by hand; komi-learn won't edit a file it can't parse.")
+                return rep
             hooks = data.get("hooks", {})
             removed = 0
             for event in list(hooks.keys()):
@@ -290,8 +327,11 @@ def uninstall(*, keep_data: bool = True) -> InstallReport:
                     hooks.pop(event, None)
             if not hooks:
                 data.pop("hooks", None)
-            sp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            rep.add("hooks", True, f"removed {removed} komi-learn hook entr(ies)")
+            if _atomic_write_json(sp, data):
+                rep.add("hooks", True, f"removed {removed} komi-learn hook entr(ies)")
+            else:
+                rep.add("hooks", False, "failed to write settings.json (hooks NOT removed)",
+                        fix=f"Check permissions on {sp}")
         else:
             rep.add("hooks", True, "no settings.json")
     except Exception as e:

@@ -93,7 +93,7 @@ class ClaudeCLILLM:
         try:
             proc = subprocess.run(
                 [self.claude_bin, "auth", "status", "--json"],
-                capture_output=True, text=True, timeout=20, env=_clean_env(),
+                capture_output=True, text=True, timeout=8, env=_clean_env(),
             )
             data = json.loads((proc.stdout or "{}").strip() or "{}")
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError,

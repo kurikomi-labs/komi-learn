@@ -34,28 +34,51 @@ from .model import Learning, Scope, Category
 # Conservative on purpose: false positives (over-redacting to personal) are
 # cheap; false negatives (leaking to global) are not. "When in doubt, personal."
 
+# NOTE: this detector set is mirrored verbatim in the pool repo's CI verifier
+# (pool-repo-template/.github/scripts/verify.py). A parity test asserts they match.
+# When in doubt the floor over-rejects (to personal) — false positives are cheap,
+# false negatives leak. Each entry names what it catches.
 _SECRET_PATTERNS = [
-    re.compile(r"\b(sk|pk|rk)-[A-Za-z0-9]{16,}\b"),                 # generic API keys
+    re.compile(r"\b(sk|pk|rk)[-_](?:live|test|proj)?[-_]?[A-Za-z0-9]{16,}\b"),  # OpenAI/Stripe sk-/sk_/sk_live_/rk_live_/pk_
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),                            # AWS access key id
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),                  # GitHub tokens
+    re.compile(r"\bASIA[0-9A-Z]{16}\b"),                            # AWS temp access key
+    re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}\b"),                     # Google API key
+    re.compile(r"\bya29\.[0-9A-Za-z_\-]+"),                         # Google OAuth access token
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),                  # GitHub classic tokens
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),                # GitHub fine-grained PAT
+    re.compile(r"\bglpat-[A-Za-z0-9_\-]{16,}\b"),                   # GitLab PAT
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),                # Slack tokens
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),             # PEM private keys
-    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),  # JWT
-    re.compile(r"(?i)\b(password|passwd|secret|api[_-]?key|token|bearer)\b\s*[:=]\s*\S+"),
+    re.compile(r"\bxapp-[0-9]+-[A-Za-z0-9-]{10,}\b"),               # Slack app token
+    re.compile(r"\bSG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}\b"), # SendGrid
+    re.compile(r"\bnpm_[A-Za-z0-9]{30,}\b"),                        # npm token
+    re.compile(r"\bdop_v1_[a-f0-9]{32,}\b"),                        # DigitalOcean token
+    re.compile(r"\bAC[a-f0-9]{32}\b"),                              # Twilio Account SID
+    re.compile(r"\bhf_[A-Za-z0-9]{20,}\b"),                         # HuggingFace token
+    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),          # PEM private keys
+    re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),  # JWT
+    # connection strings carrying a password: scheme://user:pass@host
+    re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:[^\s:/@]+@[^\s/]+", re.I),
+    re.compile(r"(?i)\b(password|passwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|token|bearer|client[_-]?secret)\b\s*[:=]\s*['\"]?\S{6,}"),
 ]
 
 _PII_PATTERNS = [
     re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),     # email
-    re.compile(r"\b(?:\+?\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-]?){2,4}\d{2,4}\b"),  # phone-ish
+    re.compile(r"\b(?:\+?\d{1,3}[\s.\-]?)?(?:\(?\d{2,4}\)?[\s.\-]?){2,5}\d{2,4}\b"),  # phone-ish (intl-tolerant)
     re.compile(r"\b\d{1,5}\s+[A-Z][a-z]+\s+(St|Street|Ave|Avenue|Rd|Road|Blvd|Lane|Ln|Dr|Drive)\b"),
+    re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),                           # US SSN
+    re.compile(r"\b(?:\d[ -]*?){13,16}\b"),                         # credit-card-ish (13-16 digits)
 ]
 
 _IDENTIFIER_PATTERNS = [
     re.compile(r"(?i)\b[A-Z]:\\Users\\[^\\\s]+"),                   # Windows home path
-    re.compile(r"/(?:home|Users)/[^/\s]+"),                        # *nix home path
-    re.compile(r"\bhttps?://(?:\d{1,3}\.){3}\d{1,3}\b"),           # private/raw IP URL
-    re.compile(r"\b(?:10|127|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.(?:\d{1,3}\.){1,2}\d{1,3}\b"),
-    re.compile(r"(?i)\bhttps?://[a-z0-9-]+\.(?:internal|local|corp|intranet)\b"),
+    re.compile(r"/(?:home|Users)/[^/\s]+"),                        # *nix / macOS home path
+    re.compile(r"/root/[^/\s]+"),                                  # root home
+    re.compile(r"\bhttps?://(?:\d{1,3}\.){3}\d{1,3}\b"),           # raw IPv4 URL
+    re.compile(r"\b(?:10|127|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.(?:\d{1,3}\.){1,2}\d{1,3}\b"),  # private IPv4
+    re.compile(r"\bhttps?://\[[0-9a-fA-F:]+\]"),                    # IPv6 URL
+    re.compile(r"\b(?:[0-9a-fA-F]{1,4}:){4,7}[0-9a-fA-F]{0,4}\b"),  # bare IPv6
+    re.compile(r"(?i)\bhttps?://[a-z0-9-]+\.(?:internal|local|corp|intranet|lan)\b"),
+    re.compile(r"(?i)\b[a-z0-9-]+\.onion\b"),                       # tor hidden service
 ]
 
 

@@ -58,7 +58,84 @@ def state_path() -> Path:
     return personal_root() / "state.json"
 
 
+def update_state(mutator):
+    """Atomically read-modify-write state.json under an exclusive cross-process lock.
+
+    Several Claude Code sessions run hooks concurrently and all touch this file
+    (distill turn counter, pool-sync clock, curate clock). Without locking + atomic
+    writes, concurrent updates clobber each other or truncate the file. ``mutator``
+    receives the current state dict (possibly {}) and mutates it in place; its
+    return value (if not None) is taken as the result to hand back to the caller.
+
+    Returns whatever the mutator returns (e.g. a bool "should I fire?"). Best-effort:
+    on any I/O/lock error it still runs the mutator on a fresh dict so callers never
+    crash — the worst case is a missed/duplicated cadence tick, never a broken hook.
+    """
+    import json
+    import tempfile
+
+    sp = state_path()
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    lock = sp.with_suffix(".lock")
+    fh = None
+    try:
+        fh = open(lock, "a+")
+        _lock_file(fh)
+        state = {}
+        if sp.exists():
+            try:
+                state = json.loads(sp.read_text(encoding="utf-8")) or {}
+            except (json.JSONDecodeError, OSError):
+                state = {}            # tolerate a corrupt/partial file
+        if not isinstance(state, dict):
+            state = {}
+        result = mutator(state)
+        # atomic write
+        fd, tmp = tempfile.mkstemp(dir=str(sp.parent), suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(state))
+        os.replace(tmp, sp)
+        return result
+    except Exception:
+        try:
+            return mutator({})
+        except Exception:
+            return None
+    finally:
+        if fh is not None:
+            try:
+                _unlock_file(fh)
+            finally:
+                fh.close()
+
+
+def _lock_file(fh) -> None:
+    """Acquire an exclusive advisory lock (blocking). No-op if locking is unavailable."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        pass
+
+
+def _unlock_file(fh) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+
+
 __all__ = [
     "claude_home", "personal_root", "project_root", "index_path",
-    "queue_dir", "outbox_dir", "inbox_dir", "keys_dir", "state_path",
+    "queue_dir", "outbox_dir", "inbox_dir", "keys_dir", "state_path", "update_state",
 ]

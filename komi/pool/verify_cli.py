@@ -53,7 +53,7 @@ def check_file(path: Path, *, require_signature: bool = True, repo_root: Path | 
     sig = learning.get("provenance", {}).get("signature")
     pk = env.get("signer", {}).get("public_key", "")
     if require_signature:
-        if not verify_signature(_signing_message(learning), sig or "", pk):
+        if not verify_signature(_signing_message(learning, signer_public_key=pk), sig or "", pk):
             problems.append(f"{path}: signature missing or invalid")
 
     # scrub (no private data may merge)

@@ -23,18 +23,32 @@ from ..engine.model import Learning, verify_id, canonical_json
 from ..engine.classify import safety_floor
 from .identity import Contributor, verify_signature
 
+# A pool learning is a short, general lesson — not a document. Cap the publishable
+# text so one contribution can't bloat the shared repo (anti-DoS). ~8KB is generous.
+MAX_CONTRIBUTION_CHARS = 8000
+
 
 # ── Envelope ──────────────────────────────────────────────────────────────
 # What actually travels to/from the pool. The signature covers the canonical
 # publishable content (the same bytes the id is derived from) plus parent_ids,
 # so neither the content nor its DAG position can be altered post-signature.
 
-def _signing_message(publishable: dict) -> bytes:
+def _signing_message(publishable: dict, *, signer_public_key: str = "") -> bytes:
+    """The bytes the contributor signs. Covers the content id, the full content,
+    the DAG parents, AND the provenance.origin + the signer's public key.
+
+    Including ``origin`` stops post-signature attribution forgery (claiming a
+    learning came from a more-trusted source). Binding ``signer_public_key`` stops
+    a valid signature being replayed under a different identity. Everything that
+    affects trust must be inside the signature."""
+    prov = publishable.get("provenance", {})
     root = {
         "id": publishable["id"],
         "content": {k: publishable[k] for k in
                     ("schema", "type", "category", "title", "body", "trigger", "tags")},
-        "parent_ids": publishable.get("provenance", {}).get("parent_ids", []),
+        "parent_ids": prov.get("parent_ids", []),
+        "origin": prov.get("origin", ""),
+        "signer": signer_public_key,
     }
     return canonical_json(root)
 
@@ -57,6 +71,13 @@ def prepare_contribution(
     ran, but a contribution is the last line before the data leaves the device)."""
     pub = learning.publishable()
 
+    # 0. SIZE CAP — a learning is a short, general lesson, not a document. Reject
+    #    oversized payloads so a single contribution can't bloat the pool repo.
+    body_len = len(pub.get("body", "")) + len(pub.get("title", "")) + len(pub.get("trigger", ""))
+    if body_len > MAX_CONTRIBUTION_CHARS:
+        return ContributionResult(ok=False,
+                                  reason=f"too-large:{body_len}>{MAX_CONTRIBUTION_CHARS}")
+
     # 1. SCRUB — second, independent floor pass over the publishable text only.
     joined = " \n ".join([pub["title"], pub["body"], pub["trigger"], " ".join(pub["tags"])])
     floor = safety_floor(joined, project_terms=project_terms)
@@ -72,8 +93,8 @@ def prepare_contribution(
     if not verify_id(pub):
         return ContributionResult(ok=False, reason="id-mismatch")
 
-    # 5. SIGN the root.
-    message = _signing_message(pub)
+    # 5. SIGN the root (binds content + origin + the signer's own pubkey).
+    message = _signing_message(pub, signer_public_key=contributor.public_key)
     signature = contributor.sign(message)
     pub.setdefault("provenance", {})["signature"] = signature or None
 
@@ -124,7 +145,8 @@ def ingest_verify(envelope: dict, *, require_signature: bool = True) -> VerifyRe
 
     sig = learning.get("provenance", {}).get("signature")
     pk = envelope.get("signer", {}).get("public_key", "")
-    rep.signature_ok = verify_signature(_signing_message(learning), sig or "", pk)
+    rep.signature_ok = verify_signature(
+        _signing_message(learning, signer_public_key=pk), sig or "", pk)
     if not rep.signature_ok:
         rep.reasons.append("signature-invalid-or-unsigned")
 
@@ -143,7 +165,7 @@ def pull(
     inbox_dir: str | Path,
     *,
     categories: Optional[list[str]] = None,
-    require_signature: bool = False,
+    require_signature: bool = True,
     min_corroboration: int = 1,
 ) -> list[Learning]:
     """STUBBED network: read envelopes from a local inbox (what a real server's

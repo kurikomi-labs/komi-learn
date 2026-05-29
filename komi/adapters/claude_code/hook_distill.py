@@ -48,26 +48,19 @@ def main() -> int:
 
 
 def _should_distill(session_id: str) -> bool:
-    """Throttle by turn count using a tiny JSON state file. Returns True when the
-    accumulated turns since the last distill reach NUDGE_TURNS, and resets."""
-    sp = paths.state_path()
-    state = {}
-    try:
-        if sp.exists():
-            state = json.loads(sp.read_text(encoding="utf-8"))
-    except Exception:
-        state = {}
+    """Throttle by turn count, via an atomic+locked state update so concurrent
+    sessions can't lose increments or corrupt the file. Returns True (and resets)
+    when accumulated turns reach NUDGE_TURNS."""
     key = f"turns:{session_id}"
-    state[key] = state.get(key, 0) + 1
-    fire = state[key] >= NUDGE_TURNS
-    if fire:
-        state[key] = 0
-    try:
-        sp.parent.mkdir(parents=True, exist_ok=True)
-        sp.write_text(json.dumps(state), encoding="utf-8")
-    except Exception:
-        pass
-    return fire
+
+    def _mut(state: dict) -> bool:
+        state[key] = state.get(key, 0) + 1
+        if state[key] >= NUDGE_TURNS:
+            state[key] = 0
+            return True
+        return False
+
+    return bool(paths.update_state(_mut))
 
 
 def _spawn_worker(transcript: str, session_id: str, cwd: str) -> None:

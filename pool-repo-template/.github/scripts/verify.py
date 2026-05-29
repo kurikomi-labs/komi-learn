@@ -83,12 +83,16 @@ def verify_id(rec: dict) -> bool:
     return False
 
 
-def _signing_message(rec: dict) -> bytes:
+def _signing_message(rec: dict, signer_public_key: str = "") -> bytes:
+    # MUST mirror komi/pool/contribute.py::_signing_message exactly.
+    prov = rec.get("provenance", {})
     root = {
         "id": rec["id"],
         "content": {k: rec.get(k) for k in
                     ("schema", "type", "category", "title", "body", "trigger", "tags")},
-        "parent_ids": rec.get("provenance", {}).get("parent_ids", []),
+        "parent_ids": prov.get("parent_ids", []),
+        "origin": prov.get("origin", ""),
+        "signer": signer_public_key,
     }
     return canonical_json(root)
 
@@ -107,26 +111,46 @@ def verify_signature(message: bytes, signature_b64: str, public_key_b64: str) ->
 
 # ── safety scrub (mirror of komi/engine/classify.py detectors) ──────────────
 
+# MUST mirror komi/engine/classify.py exactly. A parity test (tests/test_review_fixes.py)
+# fails if these drift from the engine's detectors.
 _SECRET = [
-    re.compile(r"\b(sk|pk|rk)-[A-Za-z0-9]{16,}\b"),
+    re.compile(r"\b(sk|pk|rk)[-_](?:live|test|proj)?[-_]?[A-Za-z0-9]{16,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bASIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}\b"),
+    re.compile(r"\bya29\.[0-9A-Za-z_\-]+"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bglpat-[A-Za-z0-9_\-]{16,}\b"),
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
-    re.compile(r"(?i)\b(password|passwd|secret|api[_-]?key|token|bearer)\b\s*[:=]\s*\S+"),
+    re.compile(r"\bxapp-[0-9]+-[A-Za-z0-9-]{10,}\b"),
+    re.compile(r"\bSG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}\b"),
+    re.compile(r"\bnpm_[A-Za-z0-9]{30,}\b"),
+    re.compile(r"\bdop_v1_[a-f0-9]{32,}\b"),
+    re.compile(r"\bAC[a-f0-9]{32}\b"),
+    re.compile(r"\bhf_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
+    re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:[^\s:/@]+@[^\s/]+", re.I),
+    re.compile(r"(?i)\b(password|passwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|token|bearer|client[_-]?secret)\b\s*[:=]\s*['\"]?\S{6,}"),
 ]
 _PII = [
     re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
-    re.compile(r"\b(?:\+?\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-]?){2,4}\d{2,4}\b"),
+    re.compile(r"\b(?:\+?\d{1,3}[\s.\-]?)?(?:\(?\d{2,4}\)?[\s.\-]?){2,5}\d{2,4}\b"),
     re.compile(r"\b\d{1,5}\s+[A-Z][a-z]+\s+(St|Street|Ave|Avenue|Rd|Road|Blvd|Lane|Ln|Dr|Drive)\b"),
+    re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
+    re.compile(r"\b(?:\d[ -]*?){13,16}\b"),
 ]
 _IDENT = [
     re.compile(r"(?i)\b[A-Z]:\\Users\\[^\\\s]+"),
     re.compile(r"/(?:home|Users)/[^/\s]+"),
+    re.compile(r"/root/[^/\s]+"),
     re.compile(r"\bhttps?://(?:\d{1,3}\.){3}\d{1,3}\b"),
     re.compile(r"\b(?:10|127|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.(?:\d{1,3}\.){1,2}\d{1,3}\b"),
-    re.compile(r"(?i)\bhttps?://[a-z0-9-]+\.(?:internal|local|corp|intranet)\b"),
+    re.compile(r"\bhttps?://\[[0-9a-fA-F:]+\]"),
+    re.compile(r"\b(?:[0-9a-fA-F]{1,4}:){4,7}[0-9a-fA-F]{0,4}\b"),
+    re.compile(r"(?i)\bhttps?://[a-z0-9-]+\.(?:internal|local|corp|intranet|lan)\b"),
+    re.compile(r"(?i)\b[a-z0-9-]+\.onion\b"),
 ]
 
 
@@ -188,7 +212,7 @@ def check_file(path: Path, *, require_signature: bool, repo_root: Path) -> list[
     if require_signature:
         sig = lng.get("provenance", {}).get("signature")
         pk = env.get("signer", {}).get("public_key", "")
-        if not verify_signature(_signing_message(lng), sig or "", pk):
+        if not verify_signature(_signing_message(lng, pk), sig or "", pk):
             problems.append(f"{path}: signature missing or invalid")
 
     joined = " \n ".join([lng.get("title", ""), lng.get("body", ""),

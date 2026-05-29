@@ -91,6 +91,12 @@ def load() -> Config:
             }.items():
                 if v is not None:
                     setattr(cfg, k, v)
+        except json.JSONDecodeError as e:
+            # Don't silently run on defaults — a corrupt config that quietly
+            # disables the pool is exactly the kind of "looks fine but isn't" trap
+            # the review flagged. Surface it; doctor reports it as a failure too.
+            import sys
+            sys.stderr.write(f"komi-learn: config.json is invalid JSON, using defaults: {e}\n")
         except Exception:
             pass
     # env overrides

@@ -72,23 +72,17 @@ def maybe_curate_in_background() -> None:
 
 
 def _curate_due() -> bool:
-    sp = paths.state_path()
-    state = {}
-    try:
-        if sp.exists():
-            state = json.loads(sp.read_text(encoding="utf-8"))
-    except Exception:
-        state = {}
-    last = float(state.get("last_curated", 0) or 0)
-    if time.time() - last < CURATE_INTERVAL_DAYS * 86400:
-        return False
-    state["last_curated"] = time.time()
-    try:
-        sp.parent.mkdir(parents=True, exist_ok=True)
-        sp.write_text(json.dumps(state), encoding="utf-8")
-    except Exception:
-        pass
-    return True
+    """Atomic+locked cadence check (concurrent sessions safe)."""
+    now = time.time()
+
+    def _mut(state: dict) -> bool:
+        last = float(state.get("last_curated", 0) or 0)
+        if now - last < CURATE_INTERVAL_DAYS * 86400:
+            return False
+        state["last_curated"] = now
+        return True
+
+    return bool(paths.update_state(_mut))
 
 
 def _worker() -> None:

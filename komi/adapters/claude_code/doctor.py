@@ -87,6 +87,13 @@ def _check_hooks() -> Check:
 
 def _check_config() -> Check:
     try:
+        cpath = paths.personal_root() / "config.json"
+        if cpath.exists():
+            try:
+                json.loads(cpath.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as e:
+                return Check("config", "fail", f"config.json is invalid JSON: {e}",
+                            "Repair or delete ~/.claude/komi/config.json, then re-run komi-learn install")
         from . import config as cfg_mod
         cfg = cfg_mod.load()
         if cfg.pool_enabled:

@@ -158,23 +158,31 @@ class Store:
         base = re.sub(r"[^a-z0-9]+", "-", (learning.title or "skill").lower()).strip("-")[:48]
         return base or "skill"
 
-    def _upsert_skill(self, learning: Learning) -> str:
-        """Persist a procedural learning as ``skills/<slug>/SKILL.md``.
+    def _skill_dir_for(self, learning: Learning) -> Path:
+        """Directory for a skill, keyed ONLY by the content id (not the title).
 
-        The directory is named after the id so two distinct learnings never collide
-        on a slug; the human-friendly slug is part of the path for readability. The
-        file carries agentskills.io-style frontmatter plus the verifiable JSON block,
-        so it's a real skill on disk AND losslessly round-trippable."""
+        Earlier this embedded the title-slug in the dir name, so editing a skill's
+        title produced a NEW directory and orphaned the old one (two dirs, same id).
+        Keying purely on the id makes the path stable across title edits — the
+        human-readable name lives in the SKILL.md frontmatter, where edits are free."""
+        short = learning.id.split(":", 1)[-1][:16]
+        return self._skills_dir() / short
+
+    def _upsert_skill(self, learning: Learning) -> str:
+        """Persist a procedural learning as ``skills/<id>/SKILL.md`` (id-keyed dir).
+
+        The file carries agentskills.io-style frontmatter plus the verifiable JSON
+        block, so it's a real skill on disk AND losslessly round-trippable."""
         existing = {l.id: l for l in self._read_skills()}
         if learning.id in existing:
-            # corroboration: same content seen again
+            # corroboration: same content seen again — preserve telemetry + age
             prior = existing[learning.id]
             learning.confidence = min(1.0, max(prior.confidence, learning.confidence) + 0.1)
             learning.usage = prior.usage
-            learning.lifecycle.created_at = prior.lifecycle.created_at or learning.lifecycle.created_at
-        slug = self._skill_slug(learning)
-        short = learning.id.split(":", 1)[-1][:12]
-        d = self._skills_dir() / f"{slug}-{short}"
+            if prior.lifecycle.created_at:
+                learning.lifecycle.created_at = prior.lifecycle.created_at
+            learning.lifecycle.pinned = learning.lifecycle.pinned or prior.lifecycle.pinned
+        d = self._skill_dir_for(learning)
         d.mkdir(parents=True, exist_ok=True)
         self._atomic_write(d / "SKILL.md", self._render_skill(learning))
         self._index_one(learning, source="skill")
@@ -205,12 +213,19 @@ class Store:
         d = self._skills_dir()
         if not d.exists():
             return []
-        out: list[Learning] = []
+        # Dedup by id, keeping the most-recently-modified file. This tolerates
+        # legacy slug-named dirs (pre-id-keying) that may duplicate an id, so a
+        # title edit in the old scheme can't surface two copies of one learning.
+        by_id: dict[str, tuple[float, Learning]] = {}
         for skill_md in d.glob("*/SKILL.md"):
             rec = _extract_json_block(skill_md.read_text(encoding="utf-8", errors="replace"))
-            if rec is not None:
-                out.append(Learning.from_dict(rec))
-        return out
+            if rec is None:
+                continue
+            lng = Learning.from_dict(rec)
+            mtime = skill_md.stat().st_mtime
+            if lng.id not in by_id or mtime > by_id[lng.id][0]:
+                by_id[lng.id] = (mtime, lng)
+        return [lng for _, lng in by_id.values()]
 
     def get(self, learning_id: str) -> Optional[Learning]:
         for lng in self.all():
@@ -253,8 +268,19 @@ class Store:
     @staticmethod
     def _open_db(path: Path) -> sqlite3.Connection:
         path.parent.mkdir(parents=True, exist_ok=True)
-        db = sqlite3.connect(str(path))
+        # timeout: block (don't instantly error) when another session holds a write
+        # lock — several Claude Code windows share this one index.db.
+        db = sqlite3.connect(str(path), timeout=10.0)
         db.row_factory = sqlite3.Row
+        # WAL lets readers and a writer coexist (recall while the curator writes);
+        # busy_timeout makes concurrent writers wait-and-retry instead of raising
+        # "database is locked". Both are critical for multi-session safety.
+        try:
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA busy_timeout=10000")
+            db.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.OperationalError:
+            pass
         db.executescript(
             """
             CREATE TABLE IF NOT EXISTS learnings (
@@ -324,17 +350,38 @@ class Store:
         ``index.db`` — the "one brain"). So we only clear rows that belong to this
         store's root, never the whole table — otherwise a project reindex would
         wipe personal rows (and vice-versa). Rows are namespaced by ``origin_root``.
+
+        IMPORTANT: usage telemetry (reused/last_used) lives only in the DB — it is
+        runtime state, not content, so it isn't in the Markdown source. We must
+        therefore PRESERVE it across a reindex (read it first, reapply it after),
+        or every reindex would zero out recall/reuse counts and make active
+        learnings look prunable. See the data-loss fix.
         """
+        prior = {
+            r["id"]: (r["reused"] or 0, r["last_used"])
+            for r in self._db.execute(
+                "SELECT id, reused, last_used FROM learnings WHERE origin_root=?",
+                (self._root_key,),
+            )
+        }
         self._db.execute("DELETE FROM learnings WHERE origin_root=?", (self._root_key,))
         self._db.commit()
         n = 0
-        for lng in self.all():
-            self._index_one(lng, source=_FILE_FOR_TYPE.get(lng.type, "?"))
-            n += 1
-        for lng in extra:
-            self._index_one(lng, source="skill")
+        for lng in list(self.all()) + list(extra):
+            self._reapply_usage(lng, prior)
+            self._index_one(lng, source=_FILE_FOR_TYPE.get(lng.type, "skill"))
             n += 1
         return n
+
+    @staticmethod
+    def _reapply_usage(lng: Learning, prior: dict) -> None:
+        """Carry forward DB-only telemetry onto a freshly-loaded learning so a
+        reindex never loses it. Keeps the max of file vs prior (corroboration may
+        have bumped the file's confidence; usage only ever grows)."""
+        if lng.id in prior:
+            reused, last_used = prior[lng.id]
+            lng.usage.reused = max(lng.usage.reused, reused)
+            lng.usage.last_used = lng.usage.last_used or last_used
 
     def search(self, query: str, *, limit: int = 20,
                scopes: Optional[list[str]] = None) -> list[sqlite3.Row]:

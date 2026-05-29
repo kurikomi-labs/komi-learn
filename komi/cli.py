@@ -176,7 +176,10 @@ def cmd_login(args) -> int:
         return 1
     _p(f"{PRODUCT}: launching `claude auth login` (uses your Claude.ai subscription)…\n")
     try:
-        rc = subprocess.call(["claude", "auth", "login"])
+        rc = subprocess.call(["claude", "auth", "login"], timeout=300)
+    except subprocess.TimeoutExpired:
+        _p(f"\n{PRODUCT}: login timed out after 5 minutes. Run `claude auth login` directly, then `komi-learn doctor`.")
+        return 1
     except Exception as e:
         _p(f"{PRODUCT}: could not launch login — {e}")
         return 1

@@ -174,6 +174,10 @@ class Learning:
                 d[key] = klass(**{k: v for k, v in val.items() if k in allowed})
             elif val is None:
                 d[key] = klass()
+        # Normalize tags on load so a hand-edited file with empty/blank tags can't
+        # produce a Learning whose id later diverges from the clean copy.
+        if isinstance(d.get("tags"), list):
+            d["tags"] = [t for t in d["tags"] if isinstance(t, str) and t.strip()]
         allowed_top = set(cls.__dataclass_fields__)  # type: ignore[attr-defined]
         return cls(**{k: v for k, v in d.items() if k in allowed_top})
 
@@ -268,7 +272,11 @@ def verify_id(record: dict[str, Any]) -> bool:
             import blake3  # type: ignore
             return declared == f"blake3:{blake3.blake3(canon).hexdigest()}"
         except Exception:
-            return False  # claims blake3 but we can't verify → reject
+            # Correct (not a bug): we will NOT "verify" a blake3 id by recomputing
+            # a blake2b hash — that can't match, and pretending otherwise would
+            # accept unverifiable content. A machine consuming a blake3 pool must
+            # install blake3 (the `crypto` extra). doctor/requirements flag this.
+            return False
     if algo == "blake2b":
         import hashlib
         return declared == f"blake2b:{hashlib.blake2b(canon, digest_size=32).hexdigest()}"
