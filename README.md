@@ -107,8 +107,15 @@ If you already use Claude Code, you're **already logged in** — just install:
 
 ```bash
 pip install komi-learn        # (today: pip install -e . from this repo)
-komi-learn install            # verify requirements + set everything up
+komi-learn install            # Claude Code (default)
+komi-learn install --host codex   # OpenAI Codex CLI (second host)
 ```
+
+> **Works across agents.** The learning engine is host-agnostic — the same model,
+> store, distiller, and recall power every host via a thin adapter
+> (`komi/adapters/base.py`). Claude Code and OpenAI Codex CLI are supported today
+> (`examples/demo_codex_host.py` proves a learning distilled in Codex is recalled
+> next session, no Claude Code involved). New hosts implement two methods.
 
 Only if `komi-learn install` reports the model check failing because you're *not*
 logged in do you need `claude auth login` (or pass `--api-key sk-ant-...`). Already

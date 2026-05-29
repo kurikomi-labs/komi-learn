@@ -14,6 +14,10 @@
 
 **Phase 4 — The Curator.** Slow (~weekly) consolidation pass: deterministic pruning (archive, never delete, stale+unused+low-confidence; pinned/pool exempt) + LLM "umbrella" consolidation of overlapping skills. Cadence-guarded at SessionStart; writes `CURATION_REPORT.md`; `komi-learn curate`. *(Also closed a gap here: procedural learnings now persist as `skills/<slug>/SKILL.md`.)*
 
+**Reviews (4 lenses).** Adversarial correctness/security bug-hunt, then AI-Engineer, Security-Engineer, and Software-Architect persona reviews — all real findings fixed + regression-tested (incl. a CRITICAL recall prompt-injection fence-escape). See `docs/04-ai-engineering-review.md`, `docs/05-adr-log.md`.
+
+**Phase 6 — Second host adapter (OpenAI Codex CLI).** Proves the engine is genuinely host-agnostic. `komi/adapters/base.py` Adapter ABC made real; `komi/adapters/hooklib.py` holds the host-neutral hook logic; `komi/adapters/codex/` is a THIN shim (CodexAdapter + ~/.codex paths + OpenAI/codex LLM + hooks). `komi-learn install --host codex`. **Demonstrated** end-to-end: a learning distilled in a Codex session is recalled in the next, same engine, files under `$CODEX_HOME`, zero Claude Code (`examples/demo_codex_host.py`, `tests/test_codex_adapter.py`). *(Live Codex auth not exercised from the build sandbox — same caveat as Claude Code distill; verify in a real Codex session.)*
+
 ## 🔜 Next
 
 **Phase 5 — Trust & quality at scale** *(best once the pool has volume)*

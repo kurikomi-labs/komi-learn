@@ -33,7 +33,27 @@ def _p(line: str = "") -> None:
 
 # ── commands ───────────────────────────────────────────────────────────────
 
+def _cmd_install_codex(args) -> int:
+    from komi.adapters.codex import setup as codex_setup
+    _p(f"{PRODUCT}: installing for OpenAI Codex CLI…\n")
+    rep = codex_setup.install(pool_repo_url=args.pool, api_key=args.api_key,
+                              nudge_turns=args.nudge_turns)
+    for s in rep.steps:
+        _p(f"  {_TICK[s.ok]} {s.name:8} {s.detail}")
+        if s.fix and (not s.ok or s.name in ("model", "trust")):
+            _p(f"      → {s.fix}")
+    _p()
+    if rep.ok:
+        _p(f"{PRODUCT} is installed for Codex. Recall activates next session.")
+        _p("IMPORTANT: run `codex` then `/hooks` to TRUST the new hooks (Codex requires it).")
+        return 0
+    _p(f"{PRODUCT}: Codex install incomplete — see ✗ above.")
+    return 1
+
+
 def cmd_install(args) -> int:
+    if getattr(args, "host", "claude-code") == "codex":
+        return _cmd_install_codex(args)
     from komi.adapters.claude_code import setup
     _p(f"{PRODUCT}: checking requirements…\n")
     rep = setup.install(pool_repo_url=args.pool, api_key=args.api_key,
@@ -198,8 +218,12 @@ def cmd_login(args) -> int:
 
 
 def cmd_uninstall(args) -> int:
-    from komi.adapters.claude_code import setup
-    rep = setup.uninstall(keep_data=not args.purge)
+    if getattr(args, "host", "claude-code") == "codex":
+        from komi.adapters.codex import setup as codex_setup
+        rep = codex_setup.uninstall(keep_data=not args.purge)
+    else:
+        from komi.adapters.claude_code import setup
+        rep = setup.uninstall(keep_data=not args.purge)
     for s in rep.steps:
         _p(f"  {_TICK[s.ok]} {s.name:8} {s.detail}")
     _p(f"\n{PRODUCT}: uninstalled hooks." +
@@ -216,11 +240,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="command")
 
-    pi = sub.add_parser("install", help="set up komi-learn for Claude Code (one command)")
+    pi = sub.add_parser("install", help="set up komi-learn for a host (Claude Code or Codex)")
+    pi.add_argument("--host", choices=["claude-code", "codex"], default="claude-code",
+                    help="which agent host to install for (default: claude-code)")
     pi.add_argument("--pool", metavar="URL", default=None,
                     help="global pool repo URL (e.g. https://github.com/kurikomi-labs/komi-pool)")
     pi.add_argument("--api-key", metavar="KEY", default=None,
-                    help="Anthropic API key for distillation (else uses env / claude CLI)")
+                    help="model API key for distillation (Anthropic for claude-code, OpenAI for codex)")
     pi.add_argument("--nudge-turns", type=int, default=8,
                     help="distill every N turns (default 8)")
     pi.add_argument("--allow-incomplete", action="store_true",
@@ -245,7 +271,9 @@ def build_parser() -> argparse.ArgumentParser:
     pc.set_defaults(func=cmd_curate)
 
     pu = sub.add_parser("uninstall", help="remove komi-learn hooks (keeps data)")
-    pu.add_argument("--purge", action="store_true", help="also delete ~/.claude/komi")
+    pu.add_argument("--host", choices=["claude-code", "codex"], default="claude-code",
+                    help="which host to uninstall from (default: claude-code)")
+    pu.add_argument("--purge", action="store_true", help="also delete the komi data dir")
     pu.set_defaults(func=cmd_uninstall)
 
     return p

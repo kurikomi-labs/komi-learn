@@ -53,6 +53,20 @@ def keys_dir() -> Path:
     return personal_root() / "keys"
 
 
+def pool_config() -> Optional[dict]:
+    """PoolConfig kwargs for hooklib's pool mirror, or None if the pool is off.
+    Keeps hooklib host-neutral — it just asks each host's paths for this."""
+    try:
+        from . import config as cfg_mod
+        cfg = cfg_mod.load()
+        if not cfg.pool_enabled:
+            return None
+        return {"repo_url": cfg.pool_repo_url, "cache_dir": cfg.pool_cache_dir,
+                "branch": cfg.pool_branch, "require_signature": cfg.pool_require_signature}
+    except Exception:
+        return None
+
+
 def state_path() -> Path:
     """Small JSON for cadence bookkeeping (turns since last distill, last curate)."""
     return personal_root() / "state.json"
