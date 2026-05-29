@@ -113,10 +113,54 @@ def main() -> None:
                    config=RecallConfig(k=5))
     print(block)
 
+    banner("GLOBAL POOL — approve a queued learning and publish it (local git repo)")
+    _demo_pool(workdir)
+
     banner("RESULT")
     print("  The agent now starts the new session already knowing the user's style")
-    print("  and the debugging technique — with zero commands typed. That's the loop.")
+    print("  and the debugging technique — with zero commands typed. And a general")
+    print("  learning was scrubbed, signed, and published to a GitHub-style pool repo")
+    print("  (here a local git repo) after the human gate. That's the whole system.")
     print(f"\n  (demo files under {workdir})")
+
+
+def _demo_pool(workdir: Path) -> None:
+    """Show the GitHub-backed pool: approve a queued candidate, publish it to a
+    local git repo, then pull + verify it back (re-verified locally)."""
+    import subprocess
+    from komi.pool.identity import Contributor
+    from komi.pool.github_backend import GitHubPool, PoolConfig
+    from komi.pool.queue import list_queue, set_status, publish_approved
+
+    queue = workdir / "queue"
+    items = list_queue(queue, status="pending-review")
+    if not items:
+        print("  (nothing in the review queue)")
+        return
+
+    contributor = Contributor(workdir / "keys")
+    require_sig = contributor.algo == "ed25519"
+    pool = GitHubPool(PoolConfig(repo_url="", cache_dir=str(workdir / "pool-repo"),
+                                 mode="local", require_signature=require_sig))
+    pool._ensure_local_repo()
+
+    print(f"  queue has {len(items)} item(s) awaiting review:")
+    for it in items:
+        print(f"    • {it.learning.title}  [{it.status}]")
+
+    # --- the human gate: the user approves ---
+    set_status(items[0], "approved")
+    print(f"\n  You approved: {items[0].learning.title}")
+
+    results = publish_approved(queue, pool, contributor)
+    for r in results:
+        where = r.get("path") or r.get("pr_url") or r.get("reason")
+        print(f"  published={r['published']}  →  {where}")
+
+    pulled = pool.pull()
+    print(f"\n  Pulled back from the pool (re-verified locally): "
+          f"{[l.title for l in pulled]}")
+    print(f"  signed: {require_sig}  ·  tamper-evident via content-addressed id")
 
 
 if __name__ == "__main__":

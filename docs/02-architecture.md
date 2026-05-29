@@ -269,6 +269,8 @@ Rationale recorded for review: Stage 1 guarantees no identifier/secret can *ever
 
 The killer feature, and the part that most needs to be right. It must be: **anonymous, tamper-evident, injection-safe, moderatable, and erasable.** Design follows the "Portable Agent Memory" protocol (arXiv 2605.11032).
 
+> **v1 implementation decision (2026-05-29): the pool is a GitHub repo of `.md` files — no custom server.** A dedicated repo (`kurikomi-labs/komi-pool`) holds one Markdown file per learning under `learnings/<category>/<id>.md`; each file carries the human-readable lesson plus the verifiable signed envelope in a fenced ` ```komi ` block. **Contribution = human-approved Pull Request** (`gh pr create`). **Consumption = periodic `git` sync to a local cache + local re-verification.** This gives free hosting, public auditability, PR-based moderation, and CDN distribution, and reuses the exact verification the protocol below specifies — only the transport is git instead of a bespoke API. The repo's CI (`.github/workflows/verify.yml`) re-runs id + signature + scrub verification on every PR. See `komi/pool/github_backend.py`, `komi/pool/repo_format.py`, `komi/pool/queue.py`, `komi/pool/verify_cli.py`, and `pool-repo-template/`.
+
 ### 7.1 Contribution pipeline (local → pool)
 
 ```

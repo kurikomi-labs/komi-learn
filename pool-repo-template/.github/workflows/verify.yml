@@ -1,0 +1,54 @@
+name: Verify learnings
+
+# Re-verify every contributed learning on each PR and push. This is the safety
+# gate: it independently recomputes content-addressed ids, checks signatures, and
+# re-runs the scrub so nothing tampered, unsigned, or identifying can merge.
+
+on:
+  pull_request:
+    paths: ["learnings/**"]
+  push:
+    branches: [main]
+    paths: ["learnings/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need base to diff changed files on PRs
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install komi-learn (verifier + crypto)
+        run: |
+          python -m pip install --upgrade pip
+          # Pull the verifier straight from the code repo. Pin to a tag/sha in prod.
+          pip install "komi-learn[crypto] @ git+https://github.com/kurikomi-labs/komi-learn@main"
+
+      - name: Determine changed learning files (PRs)
+        id: changed
+        if: github.event_name == 'pull_request'
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          FILES=$(git diff --name-only --diff-filter=ACM "$BASE"...HEAD -- 'learnings/**/*.md' | tr '\n' ' ')
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+
+      - name: Verify changed files (PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          if [ -z "${{ steps.changed.outputs.files }}" ]; then
+            echo "No learning files changed."
+          else
+            python -m komi.pool.verify_cli --changed ${{ steps.changed.outputs.files }}
+          fi
+
+      - name: Verify all files (push to main)
+        if: github.event_name == 'push'
+        run: python -m komi.pool.verify_cli

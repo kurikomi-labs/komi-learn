@@ -1,0 +1,5 @@
+# This repo holds only learnings + docs + CI. Nothing else.
+__pycache__/
+*.py[cod]
+.DS_Store
+/.seed-key/

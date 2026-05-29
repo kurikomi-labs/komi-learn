@@ -15,8 +15,11 @@ self-improvement loop, rebuilt to be model-agnostic, universal across personas
 (developers, knowledge workers, students, scientists), and shareable.
 
 > Status: **v1 MVP.** The personal learning loop runs end-to-end today as a
-> Claude Code plugin. The global pool's contribution/trust pipeline is fully
-> implemented locally; the network transport is stubbed (designed, not yet served).
+> Claude Code plugin. The **Global Learnings pool is a GitHub repo of `.md` files**
+> (no server): contributions go in via human-approved Pull Requests, and the engine
+> syncs the repo to a local cache and re-verifies every learning locally. The full
+> flow is tested against real git repos; pointing it at a live GitHub repo is one
+> config value.
 
 ---
 
@@ -47,9 +50,12 @@ POOL     scrub → sign → review → publish · pull → verify → cache   (P
    skills), mirrored into a SQLite FTS index. A slow curator consolidates toward
    a few rich "umbrella" skills and archives (never deletes) stale ones.
 5. **Share (optional)** — general learnings are scrubbed, content-addressed
-   (BLAKE3), signed (Ed25519), and **held in a review queue for your approval**
-   before anything reaches the public pool. Pulled global learnings are verified
-   locally and always framed as untrusted reference data.
+   (BLAKE3), signed (Ed25519), and **held in a review queue for your approval**.
+   On approval, komi-learn writes the learning as a `.md` file and **opens a Pull
+   Request** to the pool repo (`kurikomi-labs/komi-pool`); CI re-verifies it and a
+   maintainer merges. The engine periodically **syncs the pool repo** to a local
+   cache, re-verifies every learning, and surfaces relevant ones in recall — always
+   framed as untrusted community reference.
 
 **What it deliberately does NOT learn** (the difference between getting smarter
 and accumulating fear): environment-specific failures, "tool X is broken" claims,
@@ -103,6 +109,24 @@ pip install anthropic         # real LLM distillation/classification
 Tune cadence with `KOMI_NUDGE_TURNS` (default 8) and the model with
 `KOMI_DISTILL_MODEL`.
 
+### Connect the Global Learnings pool
+
+The pool is a GitHub repo of `.md` files. To enable it:
+
+1. Create a repo (e.g. `kurikomi-labs/komi-pool`) and copy in everything from
+   [`pool-repo-template/`](pool-repo-template/) (README, CONTRIBUTING, the CI
+   workflow that re-verifies every PR, CODEOWNERS, and the signed seed learnings).
+2. Point komi-learn at it, in `~/.claude/komi/config.json`:
+   ```json
+   { "pool": { "repo_url": "https://github.com/kurikomi-labs/komi-pool", "sync_hours": 12 } }
+   ```
+   or set `KOMI_POOL_REPO_URL`. Until you do, the engine runs **personal-only** —
+   no sync, nothing leaves your device.
+
+The engine then syncs the repo to `~/.claude/komi/pool/repo` on a cadence,
+re-verifies every learning locally, and surfaces relevant ones in recall. Approved
+contributions open PRs via the GitHub CLI (`gh`); install it for the publish path.
+
 ---
 
 ## Why it's trustworthy (the Global Learnings safety model)
@@ -115,9 +139,13 @@ The public pool is the killer feature and the riskiest part, so it's defense-in-
 - **A deterministic floor the LLM can't override.** Secrets/PII/machine paths/repo
   names are rejected before any LLM sees them — and re-checked on the LLM's own
   rewrite, so a "global" with a leaked path is downgraded automatically.
-- **Tamper-evident.** Each learning's id is the BLAKE3 hash of its content; editing
-  it breaks the id. Pulled learnings are re-verified locally — the server is never
-  trusted blindly.
+- **Tamper-evident, end to end.** Each learning's id is the BLAKE3 hash of its
+  content; editing it breaks the id. The pool repo's CI re-verifies every PR (id +
+  signature + a fresh scrub), and the engine re-verifies again on pull — the repo,
+  like any remote, is never trusted blindly.
+- **Transparent + reviewable.** Because the pool is a git repo of human-readable
+  `.md` files, every contribution is a PR diff a maintainer can actually read, and
+  the full history is public and auditable.
 - **Anonymous + attributable.** Local evidence is stripped before sharing;
   contributions are signed with a pseudonymous Ed25519 key, so corroboration can be
   counted across distinct signers without ever knowing who you are.
@@ -131,21 +159,24 @@ The public pool is the killer feature and the riskiest part, so it's defense-in-
 | Path | What |
 |------|------|
 | `komi/engine/` | host-agnostic engine — model, store, classify, recall, distill |
-| `komi/pool/` | global pool — identity (Ed25519), contribute/pull (PAM-style) |
-| `komi/adapters/claude_code/` | the zero-friction hooks + LLM backends |
+| `komi/pool/` | global pool — identity (Ed25519), contribute, GitHub backend, `.md` format, review queue, CI verifier |
+| `komi/adapters/claude_code/` | the zero-friction hooks + LLM backends + config |
+| `pool-repo-template/` | drop-in contents for the `komi-pool` GitHub repo (CI, docs, signed seeds) |
 | `docs/01-research.md` | deep research: Hermes, Letta, PAM, the Claude Code substrate |
 | `docs/02-architecture.md` | the full system design + open decisions |
-| `examples/demo_loop.py` | runnable end-to-end demo |
-| `tests/` | 29 tests, including the privacy-floor safety tests |
+| `examples/demo_loop.py` | runnable end-to-end demo (incl. pool publish/pull) |
+| `tests/` | 38 tests, including the privacy-floor + pool-integrity safety tests |
 
 ---
 
 ## Roadmap
 
-v1 is the personal loop + the local global pipeline. Next, in priority order:
-the pool **server** (ingest, moderation, corroboration-based trust); additional
-**host adapters** (Codex, a chat UI) behind the same two-method interface;
-**embedding-based** recall/curation (v1 uses FTS + heuristics); and a review-queue
+v1 is the personal loop + the GitHub-backed global pool (tested against local git
+repos). Next, in priority order: stand up the real `komi-pool` repo + a
+**corroboration-based trust** weighting on pull; additional **host adapters**
+(Codex, a chat UI) behind the same two-method interface; the slow **curator**
+(umbrella consolidation, archiving); **embedding-based** recall/curation (v1 uses
+FTS + heuristics); and a review-queue
 **inspection UI**. See `docs/02-architecture.md §9–10`.
 
 MIT licensed.
