@@ -28,6 +28,10 @@ from .classify import classify, ScopeJudge, derive_project_terms
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "distill.md"
 
+# A healthy distill pass yields a handful of learnings. Bound it so a misbehaving
+# or prompt-injected model can't flood the store in one pass.
+MAX_CANDIDATES_PER_PASS = 12
+
 
 class LLMClient(Protocol):
     """Minimal LLM interface. ``complete`` takes a system prompt + user content and
@@ -135,6 +139,11 @@ def distill(
     user = render_for_prompt(turns)
     raw = llm.complete(system=system, user=user)
     candidates = _parse_candidates(raw)
+    # Cap + dedup: a well-behaved pass yields a few learnings, not dozens. A
+    # misbehaving or prompt-injected model could flood the store with hundreds of
+    # junk "learnings" in one pass — bound it. Dedup by (title|body) so the same
+    # lesson stated twice in one pass isn't written twice.
+    candidates = _dedup_candidates(candidates)[:MAX_CANDIDATES_PER_PASS]
     res.candidates = len(candidates)
 
     project_terms = derive_project_terms(cwd, git_remote)
@@ -187,6 +196,19 @@ def distill_from_file(transcript_path: str | Path, **kwargs) -> DistillResult:
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
+
+def _dedup_candidates(candidates: list[dict]) -> list[dict]:
+    """Drop duplicate candidates within a single pass (same title+body), keeping
+    first occurrence. Cheap guard against a model repeating itself."""
+    seen, out = set(), []
+    for c in candidates:
+        key = ((c.get("title") or "").strip().lower(), (c.get("body") or "").strip().lower())
+        if key in seen or not key[0]:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
+
 
 def _parse_candidates(raw: str) -> list[dict]:
     """Extract the JSON array from the model's reply, tolerating stray prose or a

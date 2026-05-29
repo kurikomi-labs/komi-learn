@@ -252,6 +252,36 @@ def _build_umbrella(merged: dict, members: list[Learning]) -> Learning:
     return u
 
 
+# ── corpus health / drift surfacing ──────────────────────────────────────────
+
+def corpus_health(learnings: list[Learning]) -> dict:
+    """A cheap 'is the learning corpus drifting/going stale?' snapshot — the honest
+    analogue of model-drift monitoring for a system that has no model weights.
+
+    Returns counts + the share of active learnings that are stale-and-unused. A high
+    stale share means recall is increasingly serving aged knowledge that's never
+    used — a signal to curate or that the user's focus has moved on."""
+    active = [l for l in learnings if l.lifecycle.state == "active"]
+    n = len(active)
+    if n == 0:
+        return {"active": 0, "stale_unused": 0, "stale_share": 0.0,
+                "never_reused": 0, "avg_confidence": 0.0}
+    stale_unused = sum(
+        1 for l in active
+        if l.usage.reused == 0 and _age_days(l) > DEFAULT_STALE_DAYS
+        and (l.confidence or 0) < 0.6
+    )
+    never_reused = sum(1 for l in active if l.usage.reused == 0)
+    avg_conf = sum((l.confidence or 0) for l in active) / n
+    return {
+        "active": n,
+        "stale_unused": stale_unused,
+        "stale_share": round(stale_unused / n, 2),
+        "never_reused": never_reused,
+        "avg_confidence": round(avg_conf, 2),
+    }
+
+
 # ── report rendering ────────────────────────────────────────────────────────
 
 def render_report(rep: CurationReport) -> str:
@@ -288,6 +318,6 @@ def render_report(rep: CurationReport) -> str:
 
 __all__ = [
     "curate", "cluster", "is_prunable", "CurationReport", "ClusterProposal",
-    "ConsolidateLLM", "render_report",
+    "ConsolidateLLM", "render_report", "corpus_health",
     "DEFAULT_STALE_DAYS", "DEFAULT_CONFIDENCE_FLOOR", "MIN_CLUSTER_SIZE",
 ]

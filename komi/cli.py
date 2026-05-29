@@ -112,6 +112,14 @@ def cmd_status(args) -> int:
             by_scope[l.scope] = by_scope.get(l.scope, 0) + 1
         s.close()
         _p(f"  learnings:   {len(learns)}  ({', '.join(f'{k}:{v}' for k,v in by_scope.items()) or 'none yet'})")
+        # corpus health — the honest 'drift' signal for a model-less system
+        from komi.engine.curator import corpus_health
+        h = corpus_health(learns)
+        if h["active"]:
+            _p(f"  health:      avg-confidence {h['avg_confidence']}, "
+               f"{int(h['stale_share']*100)}% stale-unused, {h['never_reused']} never reused")
+            if h["stale_share"] >= 0.5:
+                _p(f"               (high stale share — run `komi-learn curate` to consolidate/archive)")
     except Exception as e:
         _p(f"  learnings:   (unavailable: {e})")
     return 0

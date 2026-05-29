@@ -49,6 +49,8 @@ _COMMUNITY_NOTE = (
 @dataclass
 class RecallConfig:
     k: int = 8                 # just-in-time learnings to surface
+    max_identity: int = 6      # cap identity facts so the user-model block can't bloat
+    max_community: int = 3     # cap untrusted pool items per recall (defense in depth)
     max_chars: int = 6000      # budget for the whole block (keeps the prefix lean)
     include_global: bool = True
     min_confidence: float = 0.0
@@ -67,15 +69,20 @@ def _recency_score(updated_at: str, *, half_life_days: float = 30.0) -> float:
 
 
 def _rank_score(row, fts_rank: float) -> float:
-    """Blend of the four signals from the architecture's relevance equation:
-        0.2·recency + 0.3·salience + 0.4·similarity + 0.1·depth
-    - similarity comes from FTS bm25 (negative; closer to 0 = better) → normalized
-    - salience = confidence·(1+reuse), capped
-    - recency from updated_at
-    - depth: small bonus for corroborated (higher-confidence) learnings
+    """Blend of four signals: 0.4·similarity + 0.3·salience + 0.2·recency + 0.1·depth.
+
+    Similarity (relevance to the current context) dominates by design — it's the
+    signal that should decide what surfaces, not raw popularity.
+
+    Anti-popularity-bias: salience uses a LOG-DAMPENED reuse term, not linear. The
+    old ``confidence·(1+reused)`` created a rich-get-richer loop (surfaced → marked
+    reused → ranks higher → surfaced more), ossifying recall around a few "greatest
+    hits" and starving newer/rarer-but-relevant learnings. log1p flattens the curve
+    so reuse is a gentle nudge, not a runaway multiplier — relevance still wins.
     """
     similarity = 1.0 / (1.0 + math.exp(fts_rank))           # squash bm25 into (0,1)
-    salience = min(1.0, (row["confidence"] or 0.0) * (1 + (row["reused"] or 0)))
+    reuse = max(0, row["reused"] or 0)
+    salience = min(1.0, (row["confidence"] or 0.0) * (1.0 + 0.5 * math.log1p(reuse)))
     recency = _recency_score(row["updated_at"] or "")
     depth = min(1.0, (row["confidence"] or 0.0))
     return 0.4 * similarity + 0.3 * salience + 0.2 * recency + 0.1 * depth
@@ -96,8 +103,16 @@ def recall(
     if not rows:
         return ""
 
-    identity = [r for r in rows if r["type"] == "identity"
-                and (r["confidence"] or 0) >= cfg.min_confidence]
+    # Identity (the user model) is bounded + ranked, not dumped wholesale: as the
+    # profile grows forever, an unbounded block bloats the prompt and lets stale
+    # persona facts outlive newer ones. Rank by confidence then recency, cap to N.
+    identity_all = [r for r in rows if r["type"] == "identity"
+                    and (r["confidence"] or 0) >= cfg.min_confidence]
+    identity_all.sort(
+        key=lambda r: ((r["confidence"] or 0.0), _recency_score(r["updated_at"] or "")),
+        reverse=True,
+    )
+    identity = identity_all[:cfg.max_identity]
 
     # Build the search query from everything we know about the current context.
     query = " ".join(filter(None, [
@@ -116,7 +131,22 @@ def recall(
             continue
         scored.append((_rank_score(h, h["rank"]), h))
     scored.sort(key=lambda x: x[0], reverse=True)
-    jit = [h for _, h in scored[:cfg.k]]
+
+    # Select top-k, but (a) dedup by id and (b) cap how many untrusted community
+    # (pool) items can dominate a single recall — defense in depth for a public
+    # source, so personal/project knowledge isn't crowded out by community volume.
+    jit, seen, community = [], set(), 0
+    for _, h in scored:
+        if h["id"] in seen:
+            continue
+        if h["scope"] == Scope.GLOBAL.value:
+            if community >= cfg.max_community:
+                continue
+            community += 1
+        jit.append(h)
+        seen.add(h["id"])
+        if len(jit) >= cfg.k:
+            break
 
     # If FTS found nothing (e.g. very cold start), fall back to highest-confidence.
     if not jit:
