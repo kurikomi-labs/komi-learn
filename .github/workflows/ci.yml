@@ -33,14 +33,17 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install (editable + dev extra)
+      - name: Install (editable + dev + crypto + smart extras)
         run: |
           python -m pip install --upgrade pip
-          # the engine is zero-dep by design; dev brings pytest. We do NOT install the
-          # optional extras (crypto/smart/llm) here on purpose — CI must prove the
-          # graceful-degradation paths (blake2b fallback, keyword recall, unsigned)
-          # still pass with nothing but the standard library + pytest.
-          pip install -e ".[dev]"
+          # Install the optional extras so the signed-pool tests (pynacl), real-hash
+          # tests (blake3), and semantic tests (sentence-transformers) run as written.
+          # NOTE: this means CI does NOT currently exercise the zero-dependency
+          # graceful-degradation paths (blake2b/unsigned/keyword) — several tests
+          # assume the optional deps are present rather than skipif-guarding their
+          # absence. Adding a second minimal-install matrix leg to cover the
+          # degradation paths is a tracked follow-up (see docs/03-roadmap.md).
+          pip install -e ".[dev,crypto,smart]"
 
       - name: Run tests
         run: python -m pytest -q
