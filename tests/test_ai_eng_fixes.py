@@ -1,4 +1,4 @@
-"""Regression tests for the AI-Engineer-lens review fixes (docs/04-ai-engineering-review.md):
+"""Regression tests for the AI-Engineer-lens review fixes:
 popularity-bias damping, identity/community bounding, candidate cap+dedup, corpus drift."""
 
 import time

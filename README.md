@@ -51,7 +51,7 @@ You can change anything after install, e.g. `komi-learn config set recall.semant
 3. Curate: over time it merges overlapping lessons and archives stale ones.
 4. Share (optional): general lessons can be contributed to the community pool, but only ones you approve.
 
-It tries not to learn the wrong things. Secrets, machine-specific paths, one-off failures, and "tool X is broken" complaints are filtered out by a deterministic check before the LLM ever sees them. Design notes: [docs/02-architecture.md](docs/02-architecture.md).
+It tries not to learn the wrong things. Secrets, machine-specific paths, one-off failures, and "tool X is broken" complaints are filtered out by a deterministic check before the LLM ever sees them.
 
 ## Community pool (optional)
 
@@ -79,11 +79,6 @@ It runs two sessions: you correct the agent in the first, and the second shows i
 
 The engine has no required dependencies. Optional extras add real signing (`pip install komi-learn[crypto]`) and local semantic recall (`[smart]`); without them it falls back to a stdlib hash and keyword search.
 
-## Docs
-
-- [docs/02-architecture.md](docs/02-architecture.md) — system design
-- [docs/03-roadmap.md](docs/03-roadmap.md) — what's built and what's next
-- [docs/05-adr-log.md](docs/05-adr-log.md) — key decisions and trade-offs
-- [pool-repo-template/](pool-repo-template/) — drop-in contents to run your own pool
+To run your own pool, see [pool-repo-template/](pool-repo-template/).
 
 MIT. Issues and PRs welcome.

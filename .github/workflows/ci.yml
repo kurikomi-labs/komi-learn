@@ -41,8 +41,8 @@ jobs:
           # NOTE: this means CI does NOT currently exercise the zero-dependency
           # graceful-degradation paths (blake2b/unsigned/keyword) — several tests
           # assume the optional deps are present rather than skipif-guarding their
-          # absence. Adding a second minimal-install matrix leg to cover the
-          # degradation paths is a tracked follow-up (see docs/03-roadmap.md).
+          # absence. A second minimal-install matrix leg to cover those paths is a
+          # known follow-up.
           pip install -e ".[dev,crypto,smart]"
 
       - name: Run tests

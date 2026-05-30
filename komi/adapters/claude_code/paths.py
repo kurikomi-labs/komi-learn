@@ -3,7 +3,7 @@
 Personal scope lives under ``~/.claude/komi``; project scope under
 ``<cwd>/.claude/komi`` so it can be committed and shared with a team. A single
 shared ``index.db`` (the "one brain") lives at the personal root and records each
-row's own scope. Mirrors docs/02-architecture.md §3.2.
+row's own scope.
 """
 
 from __future__ import annotations

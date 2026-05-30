@@ -1,5 +1,5 @@
 """Regression tests for the Security-Engineer + Software-Architect review fixes
-(docs/04..05). The headline one: a malicious pool learning must not break out of
+The headline one: a malicious pool learning must not break out of
 the recall data fence (prompt injection)."""
 
 import sys

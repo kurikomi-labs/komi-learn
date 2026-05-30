@@ -1,6 +1,6 @@
 """komi-learn pool — contribution & consumption pipeline (PAM-style).
 
-Contribution (local → pool), per docs/02-architecture.md §7.1:
+Contribution (local → pool):
     scrub → generalize-check → canonicalize → content-address → sign → HUMAN GATE → outbox
 
 Consumption (pool → local), §7.3:
