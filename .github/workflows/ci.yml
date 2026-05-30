@@ -1,0 +1,75 @@
+name: CI
+
+# Run the test suite + a packaging check on every push to main and every PR.
+# This is the safety net for a public repo: nothing regresses silently, and the
+# branch ruleset can require the `test` check before a merge.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  # cancel superseded runs on the same ref so a rapid push doesn't queue duplicates
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # match pyproject's supported range
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install (editable + dev + crypto + smart extras)
+        run: |
+          python -m pip install --upgrade pip
+          # Install the optional extras so the signed-pool tests (pynacl), real-hash
+          # tests (blake3), and semantic tests (sentence-transformers) run as written.
+          # NOTE: this means CI does NOT currently exercise the zero-dependency
+          # graceful-degradation paths (blake2b/unsigned/keyword) — several tests
+          # assume the optional deps are present rather than skipif-guarding their
+          # absence. Adding a second minimal-install matrix leg to cover the
+          # degradation paths is a tracked follow-up (see docs/03-roadmap.md).
+          pip install -e ".[dev,crypto,smart]"
+
+      - name: Run tests
+        run: python -m pytest -q
+
+  package:
+    name: build + twine check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel and validate metadata
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
+      - name: Verify the runtime prompt ships in the wheel
+        # guards the packaging bug class we nearly shipped: komi/engine/prompts/distill.md
+        # is loaded at runtime, so it MUST be inside the wheel or pip installs can't distill.
+        run: |
+          python - <<'PY'
+          import glob, zipfile, sys
+          whl = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(whl).namelist()
+          assert any(n.endswith("engine/prompts/distill.md") for n in names), \
+              "distill.md missing from wheel — pip-installed distillation would break"
+          print("ok: distill.md present in", whl)
+          PY

@@ -63,6 +63,11 @@
   removal-PR path.
 - 🔜 Plugin-marketplace distribution; docs site. *(external polish.)*
 - 🔜 GitHub branch protection on both repos (UI; require the "Verify learnings" check).
+- 🔜 CI: add a minimal-install matrix leg (no optional extras) to actually exercise
+  the zero-dependency degradation paths (blake2b/unsigned/keyword). The current CI
+  installs `[dev,crypto,smart]` so several signing/embedding tests run as written;
+  proving the dep-absent paths needs either skipif-guards or a second install
+  profile. (The engine *is* zero-dep; this is a test-coverage gap, not a code gap.)
 
 ## Known gaps / honest notes
 - Recall ranking is semantic (embeddings) when the model is installed, keyword FTS otherwise; both feed the same blend + a corroboration bonus.
