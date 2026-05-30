@@ -1,131 +1,89 @@
 # komi-learn
 
-**Continuous memory + self-improvement for AI agents.** Learns how you work, recalls it automatically, no commands. Claude Code & Codex.
+Continuous memory and self-improvement for coding agents. It learns how you work and recalls it automatically, with no commands. Works with Claude Code and Codex.
 
 [![PyPI](https://img.shields.io/pypi/v/komi-learn)](https://pypi.org/project/komi-learn/)
 [![Python](https://img.shields.io/pypi/pyversions/komi-learn)](https://pypi.org/project/komi-learn/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![CI](https://github.com/kurikomi-labs/komi-learn/actions/workflows/ci.yml/badge.svg)](https://github.com/kurikomi-labs/komi-learn/actions/workflows/ci.yml)
 
-**komi-learn** quietly watches how you work, distills the durable lessons (your style, your stack, techniques that pan out) in the background, and reloads the relevant ones into every new session — automatically, with no commands to type. One command to set up; then it just runs.
+It watches a session, distills durable lessons in the background (your style, your stack, fixes that worked), and loads the relevant ones at the start of the next session. No slash commands, nothing to save by hand.
 
-> Inspired by [Hermes Agent](https://github.com/nousresearch/hermes-agent)'s self-improvement loop — rebuilt to be model-agnostic, universal, and *shareable* (see the community pool below). Early days — feedback very welcome.
+The idea is from [Hermes Agent](https://github.com/nousresearch/hermes-agent); this is my own take, generalized across hosts with an optional shared layer (the community pool, below).
 
----
+It's early. The core loop is built and CI-tested, but it hasn't been battle-tested across a lot of real sessions yet. Feedback and bug reports are welcome.
 
-## What you get
-
-- 🧠 **Remembers you** — your style, your stack, your conventions, across every session.
-- 🔁 **Learns in the background** — distills durable lessons from your work after the fact; never blocks you.
-- ⚡ **Zero friction** — no slash commands, no "save this." It recalls what's relevant when a session starts.
-- 🔒 **Private by default** — everything stays on your machine. Nothing is shared unless you say so.
-- 🌍 **Optional community pool** — opt in to get useful, anonymized tips other agents have learned (and share your own, only after you approve each one).
-- 🔌 **Host-agnostic** — same brain for Claude Code or Codex; a learning from one is recalled in the next session.
-
----
-
-## Quick start
+## Install
 
 ```bash
 pip install komi-learn
-
-komi-learn install      # interactive setup — for Codex: komi-learn install --host codex
+komi-learn install            # or: komi-learn install --host codex
 ```
 
-`komi-learn install` runs a short wizard: it explains each feature in one sentence, asks simple yes/no questions, and sets everything up for you. That's it — recall and background learning start in your **very next session**.
+`install` runs a short interactive setup, then recall and background learning start in your next session. If you already use Claude Code you're already logged in. For scripts, `komi-learn install --yes` takes the defaults.
 
-Already on Claude Code? You're already logged in — nothing else to do. (Scripting it? `komi-learn install --yes` takes the recommended defaults.)
-
-<details><summary>Or install from source</summary>
+From source:
 
 ```bash
 git clone https://github.com/kurikomi-labs/komi-learn
 cd komi-learn
 pip install -e .
 ```
-</details>
 
----
-
-## Everyday commands
+## Commands
 
 ```bash
-komi-learn doctor      # is everything healthy? what to fix
-komi-learn status      # your settings + how much it's learned
-komi-learn config      # change any setting, anytime (menu)
-komi-learn sync        # pull the latest community learnings now
-komi-learn queue       # review/approve/reject what you'd share to the pool
+komi-learn doctor      # check the install and what to fix
+komi-learn status      # config + how much it has learned
+komi-learn config      # change any setting (menu, or `config set <key> <val>`)
+komi-learn sync        # pull the latest community learnings
+komi-learn queue       # review/approve/reject what you'd contribute to the pool
 komi-learn forget <x>  # erase learnings matching <x> (archive, or --hard to delete)
-komi-learn uninstall   # remove it (keeps your learnings; --purge to wipe)
+komi-learn uninstall   # remove the hooks (keeps your data; --purge to wipe)
 ```
 
-Change your mind later — you're never locked into install-time choices:
-
-```bash
-komi-learn config set recall.semantic false        # turn off meaning-based recall
-komi-learn config set pool.repo_url ""             # leave the community pool
-komi-learn config show
-```
-
----
+You can change anything after install, e.g. `komi-learn config set recall.semantic false` or leave the pool with `komi-learn config set pool.repo_url ""`.
 
 ## How it works
 
-```
-recall (session start) ──▶ your agent works ──▶ distill (background) ──▶ remembered next time
-```
+1. Recall: at session start, learnings relevant to the current context are loaded.
+2. Distill: after the session, a background pass reads the transcript and extracts durable lessons (corrections, techniques, fixes).
+3. Curate: over time it merges overlapping lessons and archives stale ones.
+4. Share (optional): general lessons can be contributed to the community pool, but only ones you approve.
 
-1. **Recall** — when a session starts, the learnings relevant to what you're doing are loaded as context.
-2. **Distill** — after you work, a background pass extracts durable lessons (corrections, techniques, fixes) from the transcript.
-3. **Curate** — over time it consolidates overlapping lessons and retires stale ones, so memory stays sharp, not bloated.
-4. **Share** *(optional)* — general, anonymized lessons can be contributed to the community pool — but only ones **you approve**.
+It tries not to learn the wrong things. Secrets, machine-specific paths, one-off failures, and "tool X is broken" complaints are filtered out by a deterministic check before the LLM ever sees them. Design notes: [docs/02-architecture.md](docs/02-architecture.md).
 
-It deliberately *doesn't* learn the wrong things — secrets, machine-specific paths, one-off failures, or "tool X is broken" gripes are filtered out. Full design: [`docs/02-architecture.md`](docs/02-architecture.md).
+## Community pool (optional)
 
----
+A public pool of general agent lessons, stored as a GitHub repo of signed Markdown files (no server). If you opt in, you get lessons other people's agents figured out, and you can contribute your own.
 
-## The community pool *(optional)*
+Contributions are scrubbed of anything identifying and never leave your machine without your approval (each one opens a PR you reviewed). Learnings are content-addressed (BLAKE3) and signed (Ed25519); one signed by more distinct GitHub accounts ranks higher when pulled. That account count is Sybil-resistant but not Sybil-proof, so it's an advisory signal, not a hard trust gate. Recalled community items are labelled and treated as untrusted input. Details: [pool-repo-template/CONTRIBUTING.md](pool-repo-template/CONTRIBUTING.md).
 
-A shared, public pool of general agent lessons — a GitHub repo of signed `.md` files, no server. Opt in during setup to:
+## Try it offline
 
-- **Get** useful, anonymized techniques other people's agents have figured out.
-- **Give back** your own general lessons — scrubbed of anything identifying, and **never shared without your explicit approval** (each contribution opens a Pull Request you reviewed).
-
-No personal data ever leaves your machine. Recalled community tips are clearly labelled and treated as untrusted reference. Details + safety model: [`docs/02-architecture.md`](docs/02-architecture.md), [`pool-repo-template/CONTRIBUTING.md`](pool-repo-template/CONTRIBUTING.md).
-
----
-
-## Want to see it first?
-
-No setup, no API key — run the offline demo:
+No setup or API key needed:
 
 ```bash
 python examples/demo_loop.py
 ```
 
-Two sessions: you correct the agent's style and a debugging trick emerges in the first; the second shows the agent recalling both with nothing typed.
-
----
+It runs two sessions: you correct the agent in the first, and the second shows it recalling that with nothing typed.
 
 ## Requirements
 
-| Need | Why | How |
-|---|---|---|
-| Python 3.10+ | the engine | `pip install komi-learn` |
-| Claude Code **or** Codex | the agent it plugs into | [claude.com/claude-code](https://claude.com/claude-code) · [Codex CLI](https://github.com/openai/codex) |
-| A working model | reads sessions to learn | already logged in on Claude Code, or `komi-learn login`, or `--api-key sk-ant-…` |
+- Python 3.10+
+- Claude Code or Codex (the agent it plugs into)
+- A working model for the distill step: your existing Claude Code login, or `komi-learn login`, or an API key via `--api-key`.
 
-`komi-learn install` **verifies all of this for real** (including an actual model call) and stops with exact fix steps if anything's missing — no silent half-install. If a hook ever can't reach the model mid-session, it quietly skips that learning pass; **your agent is never interrupted.**
+`komi-learn install` verifies these with a real model call and stops with fix steps if something's missing. At runtime, if a hook can't reach the model it skips that learning pass rather than interrupting your session.
 
----
+The engine has no required dependencies. Optional extras add real signing (`pip install komi-learn[crypto]`) and local semantic recall (`[smart]`); without them it falls back to a stdlib hash and keyword search.
 
 ## Docs
 
-| | |
-|---|---|
-| [`docs/02-architecture.md`](docs/02-architecture.md) | how the whole system is designed |
-| [`docs/03-roadmap.md`](docs/03-roadmap.md) | what's built and what's next |
-| [`docs/05-adr-log.md`](docs/05-adr-log.md) | the key decisions and their trade-offs |
-| [`pool-repo-template/`](pool-repo-template/) | drop-in contents to run your own pool |
+- [docs/02-architecture.md](docs/02-architecture.md) — system design
+- [docs/03-roadmap.md](docs/03-roadmap.md) — what's built and what's next
+- [docs/05-adr-log.md](docs/05-adr-log.md) — key decisions and trade-offs
+- [pool-repo-template/](pool-repo-template/) — drop-in contents to run your own pool
 
-MIT licensed. Contributions and feedback welcome — open an issue or PR.
+MIT. Issues and PRs welcome.
