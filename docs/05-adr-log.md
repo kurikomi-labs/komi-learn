@@ -65,8 +65,9 @@ blake3 id can't be verified without blake3 (consumers need the `crypto` extra).
 ## ADR-6 — The pool CI verifier is a vendored copy, not an import
 **Decision.** `pool-repo-template/.github/scripts/verify.py` re-implements
 canonicalization / id / signature / scrub instead of importing `komi`.
-**Context.** The pool repo must verify itself with no dependency on the (private)
-code package; CI installs only `blake3`+`pynacl`.
+**Context.** The pool repo must verify itself with no dependency on the code
+package (decoupled repos; the pool's CI installs only `blake3`+`pynacl`, never
+`komi`). Keeps the two repos independently releasable.
 **Trade-off.** Gain: pool independence, CI works standalone. Give up: duplication
 that can drift. **Mitigation:** a parity test (`tests/test_review_fixes.py`)
 asserts the vendored detectors/canonicalization/id/signing match the engine —

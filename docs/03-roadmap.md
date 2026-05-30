@@ -50,15 +50,17 @@
 - A non–Claude-Code adapter (Codex, or a chat UI) behind the same two-method interface (`recall()` + `on_session_end()`). The real test that the substrate isn't Claude-specific.
 - Persona validation (developer / finance / student / scientist on one substrate).
 
-**Phase 7 — Polish & open up**
-- Review-queue inspection UI (approve/reject pending global contributions).
-- Erasure / redaction pipeline (PAM "right to be forgotten" — designed in §7.4, not built).
-- PyPI + plugin-marketplace distribution; docs site.
-- Flip both repos public.
+**Phase 7 — Polish & open up** *(in progress)*
+- ✅ Lean, install-first README; root MIT LICENSE; public repo metadata.
+- 🔜 PyPI distribution (`pip install komi-learn`) — package built + verified; publish pending.
+- 🔜 Signer↔GitHub-account binding for corroboration (the Sybil fix deferred from the Phase 5 review — see ADR-9).
+- 🔜 Review-queue inspection UI (approve/reject pending global contributions).
+- 🔜 Erasure / redaction pipeline (PAM "right to be forgotten" — designed in §7.4, not built).
+- 🔜 Plugin-marketplace distribution; docs site.
 
 ## Known gaps / honest notes
 - Recall ranking is semantic (embeddings) when the model is installed, keyword FTS otherwise; both feed the same blend + a corroboration bonus.
 - Trust now has corroboration weighting (distinct-signer count), but the pool is young — `min_corroboration` defaults to 1 until enough lessons have independent signers to make a higher gate meaningful.
 - Two hosts proven (Claude Code + Codex) via the shared engine; broader persona validation (finance/student/scientist) still unproven end-to-end.
 - The pool repo's vendored `verify.py` must stay in sync with the engine's verification + corroboration logic (parity-tested in `tests/test_review_fixes.py` and `tests/test_corroboration.py`). After any signing-scheme change, re-run `pool-repo-template/.github/scripts/resign_seeds.py`.
-- Both repos private during testing (Phase 7 flips them public).
+- Repos are public (Phase 7). Corroboration's distinct-signer count is Sybil-forgeable until signer↔account binding lands — it's clamped + advisory-only meanwhile (ADR-9).

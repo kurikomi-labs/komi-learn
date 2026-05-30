@@ -9,13 +9,32 @@ description = "A continuous, zero-friction learning layer for AI agents — lear
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "kurikomi-labs" }]
-keywords = ["ai", "agents", "continuous-learning", "memory", "claude-code", "skills"]
+authors = [{ name = "Kurikomi Labs", email = "rainxch.dev@gmail.com" }]
+keywords = ["ai", "agents", "continuous-learning", "memory", "claude-code", "codex", "skills", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 
 # The engine runs with ZERO required dependencies (stdlib only): blake2b stands in
 # for blake3, and the pool runs in unsigned mode. Install the extras for the full
 # experience.
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/kurikomi-labs/komi-learn"
+Repository = "https://github.com/kurikomi-labs/komi-learn"
+Issues = "https://github.com/kurikomi-labs/komi-learn/issues"
+"Global Learnings Pool" = "https://github.com/kurikomi-labs/komi-pool"
 
 [project.optional-dependencies]
 # Full cryptographic trust for the global pool + faster hashing.
@@ -35,6 +54,12 @@ komi-learn = "komi.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["komi*"]
+
+# The distiller prompt is loaded at runtime (komi/engine/distill.py reads
+# prompts/distill.md), so it MUST be packaged into the wheel — otherwise a
+# pip-installed copy can't distill. Ship every .md under the package.
+[tool.setuptools.package-data]
+"*" = ["*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
