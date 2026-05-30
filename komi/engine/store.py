@@ -274,6 +274,40 @@ class Store:
                 return True
         return False
 
+    def delete(self, learning_id: str) -> bool:
+        """TRUE erasure — remove the learning from Markdown, its skill dir, AND the
+        index. This is the deliberate exception to the curator's "archive, never
+        delete" rule: the user has an explicit right to permanently erase their own
+        data (PAM "right to be forgotten" → ``komi-learn forget --hard``). Returns
+        True if anything was removed."""
+        import shutil
+        removed = False
+        # markdown-backed types: drop the matching entry entirely
+        for t in _FILE_FOR_TYPE:
+            path = self._md_path(t)
+            entries = self._read_entries(path)
+            kept = [e for e in entries if e.get("id") != learning_id]
+            if len(kept) != len(entries):
+                if kept:
+                    text = ENTRY_DELIMITER.join(self._render_entry(e) for e in kept) + "\n"
+                    self._atomic_write(path, text)
+                elif path.exists():
+                    path.unlink()          # last entry gone → remove the now-empty file
+                removed = True
+        # skills: remove the whole skill directory
+        for skill_md in self._skills_dir().glob("*/SKILL.md"):
+            rec = _extract_json_block(skill_md.read_text(encoding="utf-8", errors="replace"))
+            if rec and rec.get("id") == learning_id:
+                shutil.rmtree(skill_md.parent, ignore_errors=True)
+                removed = True
+        # index: drop every row for this id (across origins)
+        try:
+            self._db.execute("DELETE FROM learnings WHERE id=?", (learning_id,))
+            self._db.commit()
+        except Exception:
+            pass
+        return removed
+
     # ── SQLite FTS index ────────────────────────────────────────────────
 
     @staticmethod
