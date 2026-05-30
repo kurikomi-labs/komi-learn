@@ -10,7 +10,7 @@ provenance (``evidence``) or mutable bookkeeping (``usage``/``lifecycle``). This
 means two agents that independently distill the same lesson arrive at the same
 id, which is what makes pool dedup and cross-agent corroboration work.
 
-See docs/02-architecture.md §3 for the schema rationale.
+The schema is kept JSON-trivial and forward-compatible.
 """
 
 from __future__ import annotations
@@ -136,7 +136,7 @@ class Learning:
         Excludes id/signature and every local-only or mutable field, so the same
         lesson distilled by two different agents hashes identically. Tags are
         sorted and lowercased so trivial ordering/case differences don't fork
-        the id. This is the canonical content per docs/02-architecture.md §3.1.
+        the id. This is the canonical content.
         """
         return {
             "schema": self.schema,

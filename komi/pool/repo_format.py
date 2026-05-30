@@ -22,7 +22,7 @@ counts as signature #1 (so older files and the live pool need no re-signing);
 ``signatures[0]`` mirrors it. The count of *distinct, valid* signers is the
 corroboration level, computed on pull (never stored in the content id).
 
-See docs/02-architecture.md §7 and the komi-pool repo template.
+See the komi-pool repo template.
 """
 
 from __future__ import annotations

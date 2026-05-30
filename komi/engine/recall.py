@@ -11,7 +11,7 @@ block has three parts, mirroring the architecture:
 Everything recalled is wrapped in PAM-style *data-not-instructions* framing, and
 anything sourced from the public pool is additionally labelled as untrusted
 community knowledge — because recalled text (especially global) is untrusted
-input and must never be able to hijack the agent. See docs/02-architecture.md §4.1, §7.4.
+input and must never be able to hijack the agent.
 
 Critical discipline (the Hermes frozen-snapshot lesson): recall runs ONCE at
 session start so the injected prefix stays byte-stable and the host's prompt

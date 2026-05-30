@@ -15,7 +15,7 @@ Two layers, deliberately:
   always be rebuilt from the Markdown by :meth:`reindex`.
 
 Writes are atomic (temp file + os.replace) and deduped by content id, following
-the patterns in docs/02-architecture.md §3.2.
+atomic temp-file + os.replace writes, deduped by content id.
 """
 
 from __future__ import annotations

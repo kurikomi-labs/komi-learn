@@ -12,7 +12,7 @@ The LLM is injected as a ``LLMClient`` callable so the engine is fully testable
 with a deterministic mock and host-agnostic in production (Claude Agent SDK, the
 Anthropic API, or any other backend wire in the same interface). The distiller
 itself takes no outward actions and writes only to the learning stores + queue —
-matching the read-mostly tool whitelist from docs/02-architecture.md §4.2.
+matching the read-mostly tool whitelist.
 """
 
 from __future__ import annotations

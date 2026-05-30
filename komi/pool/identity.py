@@ -7,7 +7,7 @@ public key is the only thing that travels. PyNaCl is preferred; if it's absent w
 fall back to a clearly-labelled unsigned mode so the MVP still runs (the pool
 server would reject unsigned entries — that's the point of the label).
 
-See docs/02-architecture.md §7.1 step 5.
+The public key is the only thing that travels.
 """
 
 from __future__ import annotations

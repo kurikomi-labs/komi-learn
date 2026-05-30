@@ -38,7 +38,7 @@ Defense in depth remains: the counted value is still CLAMPED to
 cue), and recall only ever *down-weights/filters* on corroboration, never *admits*
 untrusted content it would otherwise exclude. Legacy signatures with no
 ``github_user`` still count (by key) but are NOT account-verified — a pool that
-wants the strong guarantee requires github_user via CI. See docs/05-adr-log.md ADR-9.
+wants the strong guarantee requires github_user via CI.
 """
 
 from __future__ import annotations

@@ -11,7 +11,7 @@ human gate lives here. A queued item has a ``status``:
 This module lists the queue, lets a caller approve/reject, and publishes approved
 items through a :class:`GitHubPool` (opening a PR, or committing in local mode).
 Publishing re-prepares + re-signs the envelope so the freshest scrub runs at the
-moment of contribution. See docs/02-architecture.md §7.1.
+moment of contribution.
 """
 
 from __future__ import annotations

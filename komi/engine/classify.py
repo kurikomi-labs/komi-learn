@@ -18,7 +18,7 @@ data into a public pool. So the design is defense-in-depth:
                             residual specificity from a global candidate.
 
 The LLM is injected as a callable so the engine runs (and tests pass) with a
-deterministic mock; the real one is wired in adapters. See docs/02-architecture.md §6.
+deterministic mock; the real one is wired in adapters.
 """
 
 from __future__ import annotations
