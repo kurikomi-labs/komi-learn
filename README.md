@@ -19,12 +19,8 @@ Works with **Claude Code** and **OpenAI Codex**. One command to set up; then it 
 
 ## Quick start
 
-> Not on PyPI yet (coming soon). For now, install from the repo:
-
 ```bash
-git clone https://github.com/kurikomi-labs/komi-learn
-cd komi-learn
-pip install -e .
+pip install komi-learn
 
 komi-learn install      # interactive setup — for Codex: komi-learn install --host codex
 ```
@@ -32,6 +28,15 @@ komi-learn install      # interactive setup — for Codex: komi-learn install --
 `komi-learn install` runs a short wizard: it explains each feature in one sentence, asks simple yes/no questions, and sets everything up for you. That's it — recall and background learning start in your **very next session**.
 
 Already on Claude Code? You're already logged in — nothing else to do. (Scripting it? `komi-learn install --yes` takes the recommended defaults.)
+
+<details><summary>Or install from source</summary>
+
+```bash
+git clone https://github.com/kurikomi-labs/komi-learn
+cd komi-learn
+pip install -e .
+```
+</details>
 
 ---
 
@@ -97,7 +102,7 @@ Two sessions: you correct the agent's style and a debugging trick emerges in the
 
 | Need | Why | How |
 |---|---|---|
-| Python 3.10+ | the engine | `pip install -e .` |
+| Python 3.10+ | the engine | `pip install komi-learn` |
 | Claude Code **or** Codex | the agent it plugs into | [claude.com/claude-code](https://claude.com/claude-code) · [Codex CLI](https://github.com/openai/codex) |
 | A working model | reads sessions to learn | already logged in on Claude Code, or `komi-learn login`, or `--api-key sk-ant-…` |
 
