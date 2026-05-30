@@ -356,21 +356,30 @@ def test_github_user_bound_into_signature(tmp_path):
     assert C.ingest_verify(env, require_signature=True).corroboration == 0
 
 
+def _sign_entry(c: Contributor, learning: dict, github_user: str) -> dict:
+    """One signature entry over `learning` by contributor `c` as `github_user`."""
+    gh = github_user.strip().lstrip("@")
+    msg = C._signing_message(learning, signer_public_key=c.public_key, signer_github_user=gh)
+    e = {"algo": c.algo, "public_key": c.public_key, "signature": c.sign(msg)}
+    if gh:
+        e["github_user"] = gh
+    return e
+
+
 @needs_nacl
 def test_sybil_one_account_many_keys_counts_once(tmp_path):
-    """The core Sybil fix: one person minting N keys but signing under ONE GitHub
-    account counts as 1, not N — distinctness is by account."""
-    env = None
-    base_learning = _learning()
-    for i in range(5):
-        ci = Contributor(tmp_path / f"key{i}")          # 5 DIFFERENT keys
-        if env is None:
-            env = _envelope(ci, base_learning, github_user="attacker")
-        else:
-            env = _co_sign(env, ci, github_user="attacker")  # ...all "attacker"
-    # 5 valid signatures, 5 distinct keys, but ONE account → corroboration 1
-    assert env is not None
-    assert len([s for s in env["signatures"]]) >= 2     # they really were appended
+    """The core Sybil fix: one person minting N keys, all signing under ONE GitHub
+    account, counts as 1 — distinctness is by account, not key. We assemble the
+    signatures array directly (merge_signature would refuse to even append a 2nd
+    same-account key — itself part of the defense; tested separately)."""
+    env = _envelope(Contributor(tmp_path / "k0"), _learning(), github_user="attacker")
+    learning = env["learning"]
+    # 4 MORE distinct keys, all claiming the same account, each a VALID signature
+    for i in range(1, 5):
+        ci = Contributor(tmp_path / f"k{i}")
+        env["signatures"].append(_sign_entry(ci, learning, "attacker"))
+    assert len(env["signatures"]) == 5                  # 5 valid sigs, 5 distinct keys
+    # ...but ONE account → corroboration collapses to 1
     assert C.ingest_verify(env, require_signature=True).corroboration == 1
 
 
@@ -407,7 +416,9 @@ def test_vendored_verify_handles_github_user(tmp_path):
     v = _load_vendored_verify()
     base = _learning()
     env = _envelope(Contributor(tmp_path / "k1"), base, github_user="alice")
-    env = _co_sign(env, Contributor(tmp_path / "k2"), github_user="alice")  # same acct
+    # second valid key, same account, appended directly (merge would refuse it)
+    env["signatures"].append(_sign_entry(Contributor(tmp_path / "k2"),
+                                         env["learning"], "alice"))
     valid, problems = v.signature_problems(env)
     assert valid == 1 and not problems              # 2 keys, 1 account → 1
     # distinct accounts → 2, still parity with engine
