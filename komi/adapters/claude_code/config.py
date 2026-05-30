@@ -34,6 +34,7 @@ class Config:
     pool_min_corroboration: int = 1       # only pull pool learnings ≥ N distinct signers (Phase 5b)
     pool_sync_hours: float = 12.0         # background sync cadence
     pool_auto_contribute: bool = False    # if True, approved globals auto-open PRs; else stay in queue
+    pool_github_user: str = ""            # your GitHub username — bound into signatures (Phase 7 Sybil)
 
     @property
     def pool_enabled(self) -> bool:

@@ -34,14 +34,24 @@ MAX_CONTRIBUTION_CHARS = 8000
 # publishable content (the same bytes the id is derived from) plus parent_ids,
 # so neither the content nor its DAG position can be altered post-signature.
 
-def _signing_message(publishable: dict, *, signer_public_key: str = "") -> bytes:
+def _signing_message(publishable: dict, *, signer_public_key: str = "",
+                     signer_github_user: str = "") -> bytes:
     """The bytes the contributor signs. Covers the content id, the full content,
-    the DAG parents, AND the provenance.origin + the signer's public key.
+    the DAG parents, the provenance.origin, the signer's public key, AND (when
+    present) the signer's GitHub username.
 
     Including ``origin`` stops post-signature attribution forgery (claiming a
     learning came from a more-trusted source). Binding ``signer_public_key`` stops
-    a valid signature being replayed under a different identity. Everything that
-    affects trust must be inside the signature."""
+    a valid signature being replayed under a different identity. Binding
+    ``signer_github_user`` (Phase 7) ties the signature to a GitHub ACCOUNT so
+    corroboration counts distinct *people* (Sybil-resistant), and so a username
+    can't be swapped post-signature. Everything that affects trust is inside the
+    signature.
+
+    BACK-COMPAT (critical): ``github_user`` is added to the signed root ONLY when
+    non-empty. An empty username produces the *exact* pre-Phase-7 bytes, so every
+    signature made before account-binding (and the seeds, and the unsigned path)
+    still verifies byte-identically — no re-signing, no scheme break."""
     prov = publishable.get("provenance", {})
     # Never hard-subscript producer-controlled data: a pool file with a `learning`
     # object that parses but lacks `id` (or any content field) must produce a
@@ -55,6 +65,8 @@ def _signing_message(publishable: dict, *, signer_public_key: str = "") -> bytes
         "origin": prov.get("origin", ""),
         "signer": signer_public_key,
     }
+    if signer_github_user:
+        root["github_user"] = signer_github_user
     return canonical_json(root)
 
 
@@ -70,10 +82,16 @@ def prepare_contribution(
     contributor: Contributor,
     *,
     project_terms: Optional[list[str]] = None,
+    github_user: str = "",
 ) -> ContributionResult:
     """Produce a signed, scrubbed envelope ready for the human gate. Does NOT
     publish. Re-runs the safety floor as defense-in-depth (the classifier already
-    ran, but a contribution is the last line before the data leaves the device)."""
+    ran, but a contribution is the last line before the data leaves the device).
+
+    ``github_user`` (Phase 7, optional): the contributor's GitHub username, bound
+    into the signature so corroboration can count distinct *accounts* and CI can
+    enforce that the PR author matches. Empty → a plain (pre-Phase-7) signature
+    that still verifies but carries no account identity."""
     pub = learning.publishable()
 
     # 0. SIZE CAP — a learning is a short, general lesson, not a document. Reject
@@ -98,8 +116,10 @@ def prepare_contribution(
     if not verify_id(pub):
         return ContributionResult(ok=False, reason="id-mismatch")
 
-    # 5. SIGN the root (binds content + origin + the signer's own pubkey).
-    message = _signing_message(pub, signer_public_key=contributor.public_key)
+    # 5. SIGN the root (binds content + origin + the signer's pubkey + github_user).
+    gh = (github_user or "").strip().lstrip("@")
+    message = _signing_message(pub, signer_public_key=contributor.public_key,
+                               signer_github_user=gh)
     signature = contributor.sign(message)
     pub.setdefault("provenance", {})["signature"] = signature or None
 
@@ -107,8 +127,12 @@ def prepare_contribution(
     # with this contributor as signature #1. The legacy top-level ``signer`` +
     # ``provenance.signature`` are kept as a mirror of signatures[0] so older
     # readers and the live pool's already-signed files stay valid (no re-signing).
+    # ``github_user`` (Phase 7) is recorded on the entry only when present; it's part
+    # of the signed message, so it can't be swapped after signing.
     sig_entry = {"algo": contributor.algo, "public_key": contributor.public_key,
                  "signature": signature or ""}
+    if gh:
+        sig_entry["github_user"] = gh
     envelope = {
         "envelope": "komi.pool/1",
         "learning": pub,
@@ -167,10 +191,13 @@ def ingest_verify(envelope: dict, *, require_signature: bool = True) -> VerifyRe
     if not rep.id_ok:
         rep.reasons.append("id-mismatch")
 
-    # Count distinct contributors with a valid signature over this content.
+    # Count distinct contributors (by GitHub account when bound) with a valid
+    # signature over this content. github_user is inside the signed bytes, so it's
+    # rebuilt here — a swapped username makes the signature fail to verify.
     rep.corroboration = count_corroboration(
         envelope,
-        sign_message=lambda lng, pk: _signing_message(lng, signer_public_key=pk),
+        sign_message=lambda lng, pk, gh="": _signing_message(
+            lng, signer_public_key=pk, signer_github_user=gh),
         verify=verify_signature,
     )
     rep.signature_ok = rep.corroboration >= 1

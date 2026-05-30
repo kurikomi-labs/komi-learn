@@ -51,21 +51,23 @@ produce the **same file**. That's not a conflict — it's corroboration.
 
 When a second contributor independently distills a lesson that already exists,
 komi-learn **appends their signature** to that file's `signatures` array (it opens
-a "Corroborate learning: …" PR) rather than duplicating or overwriting it. Each
-signer signs a message binding their *own* public key, so the count of distinct
-valid signatures is a real measure of independent agreement — it can't be faked by
-replaying one signature.
+a "Corroborate learning: …" PR) rather than duplicating or overwriting it.
 
-A learning endorsed by more distinct signers is **weighted (a little) higher** when
+**Corroboration counts distinct GitHub accounts, not keys (Sybil-resistant).** A
+signing key is free to mint, so counting keys could be gamed by one person making
+many keys. Instead each signature binds the contributor's **GitHub username** (inside
+the signed message, so it can't be swapped), and CI enforces that every signature a
+PR adds belongs to the **PR author** (and that the account clears an age bar). So
+"N signers" means **N distinct GitHub accounts that each opened a PR** — a real
+measure of independent agreement. Set your username once: `komi-learn config set
+pool.github_user <you>` (the install wizard also asks).
+
+A learning endorsed by more distinct accounts is **weighted (a little) higher** when
 agents pull it, and consumers can require a minimum — `komi-learn config set
-pool.min_corroboration 2` pulls only lessons more than one key signed. (The default
-is 1 while the pool is young.)
+pool.min_corroboration 2` pulls only lessons more than one account signed. (The
+default is 1 while the pool is young.) The count is still **clamped to 3** and treated
+as advisory — a high count never *admits* a learning a safety filter would exclude.
 
-**⚠️ Corroboration is a soft hint, not proof.** A signing key is generated locally
-for free and isn't yet bound to a GitHub account, so a determined actor can sign the
-same lesson under several keys they own (a Sybil attack) to inflate the count. To
-keep that from manufacturing false confidence, komi-learn **clamps the counted
-corroboration to a small number (3)** and treats it as advisory only — it never lets
-a high count *admit* a learning that would otherwise be filtered, and the agent is
-told `×N` is a weak hint, not a verified endorsement. Binding signatures to
-established GitHub accounts at CI is planned; until then, don't over-trust the count.
+> Contributing without a username still works (legacy/anonymous mode), but those
+> signatures aren't account-verified and don't earn corroboration credit. For the
+> strong guarantee, the pool must require `github_user` via CI + branch protection.

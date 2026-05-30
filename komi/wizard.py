@@ -82,6 +82,16 @@ def run_wizard(*, host: str, pool_url: Optional[str], api_key: Optional[str],
         # later (`komi-learn config set pool.min_corroboration 2`) to only accept
         # lessons several people independently arrived at, once the pool is dense.
         config_io.set_key(cfg, "pool.min_corroboration", 1)
+        # GitHub username (optional) - bound into your signed contributions so the
+        # pool can confirm it's really you and count distinct people, not just keys.
+        # Only used when YOU approve sharing a lesson; nothing auto-publishes.
+        gh = P.ask_text(
+            "Your GitHub username (optional, press enter to skip)", default="",
+            summary="Lets the pool verify your contributions are yours when you share "
+                    "one. Leave blank to contribute without it.",
+        )
+        if gh.strip():
+            config_io.set_key(cfg, "pool.github_user", gh.strip().lstrip("@"))
         pool_url = url
     else:
         config_io.set_key(cfg, "pool.repo_url", "")

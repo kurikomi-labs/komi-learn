@@ -49,18 +49,20 @@ def _learning(**kw) -> Learning:
     return Learning(**base).finalize()
 
 
-def _envelope(c: Contributor, lng: Learning) -> dict:
+def _envelope(c: Contributor, lng: Learning, github_user: str = "") -> dict:
     """A signed envelope from one contributor (signatures array, length 1)."""
-    return C.prepare_contribution(lng, c).envelope
+    return C.prepare_contribution(lng, c, github_user=github_user).envelope
 
 
-def _co_sign(envelope: dict, c2: Contributor) -> dict:
+def _co_sign(envelope: dict, c2: Contributor, github_user: str = "") -> dict:
     """Produce the signature a SECOND contributor would make over the same learning
     and merge it in — exactly what publish() does on an already-present file."""
     pub = envelope["learning"]
-    msg = C._signing_message(pub, signer_public_key=c2.public_key)
+    gh = github_user.strip().lstrip("@")
+    msg = C._signing_message(pub, signer_public_key=c2.public_key, signer_github_user=gh)
     sig = c2.sign(msg)
-    new_sig = {"algo": c2.algo, "public_key": c2.public_key, "signature": sig}
+    new_sig = {"algo": c2.algo, "public_key": c2.public_key, "signature": sig,
+               "github_user": gh}
     return corro.merge_signature(envelope, new_sig)
 
 
@@ -337,3 +339,119 @@ def test_signature_flood_is_clamped_and_bounded(tmp_path):
     # count is clamped and only the real signer is valid here → 1
     rep = C.ingest_verify(env, require_signature=True)
     assert rep.corroboration <= corro.MAX_COUNTED_SIGNERS and rep.corroboration == 1
+
+
+# ── Phase 7: signer↔GitHub-account binding (Sybil resistance) ────────────────
+
+@needs_nacl
+def test_github_user_bound_into_signature(tmp_path):
+    """The username is inside the signed bytes: a valid signature verifies, but
+    swapping the github_user (without re-signing) breaks verification."""
+    c = Contributor(tmp_path / "k")
+    env = _envelope(c, _learning(), github_user="alice")
+    assert env["signatures"][0]["github_user"] == "alice"
+    assert C.ingest_verify(env, require_signature=True).corroboration == 1
+    # tamper the username → signature no longer matches → not counted
+    env["signatures"][0]["github_user"] = "mallory"
+    assert C.ingest_verify(env, require_signature=True).corroboration == 0
+
+
+@needs_nacl
+def test_sybil_one_account_many_keys_counts_once(tmp_path):
+    """The core Sybil fix: one person minting N keys but signing under ONE GitHub
+    account counts as 1, not N — distinctness is by account."""
+    env = None
+    base_learning = _learning()
+    for i in range(5):
+        ci = Contributor(tmp_path / f"key{i}")          # 5 DIFFERENT keys
+        if env is None:
+            env = _envelope(ci, base_learning, github_user="attacker")
+        else:
+            env = _co_sign(env, ci, github_user="attacker")  # ...all "attacker"
+    # 5 valid signatures, 5 distinct keys, but ONE account → corroboration 1
+    assert env is not None
+    assert len([s for s in env["signatures"]]) >= 2     # they really were appended
+    assert C.ingest_verify(env, require_signature=True).corroboration == 1
+
+
+@needs_nacl
+def test_distinct_accounts_count_distinctly(tmp_path):
+    """Two genuinely different GitHub accounts → corroboration 2."""
+    c1, c2 = Contributor(tmp_path / "k1"), Contributor(tmp_path / "k2")
+    env = _co_sign(_envelope(c1, _learning(), github_user="alice"), c2, github_user="bob")
+    assert C.ingest_verify(env, require_signature=True).corroboration == 2
+
+
+@needs_nacl
+def test_merge_same_account_is_noop(tmp_path):
+    """Appending a second key under an account that already endorses is a no-op."""
+    c1, c2 = Contributor(tmp_path / "k1"), Contributor(tmp_path / "k2")
+    env = _envelope(c1, _learning(), github_user="alice")
+    assert _co_sign(env, c2, github_user="alice") is None   # same account → no-op
+
+
+@needs_nacl
+def test_legacy_unbound_signatures_still_verify(tmp_path):
+    """Back-compat: a signature made with NO github_user (pre-Phase-7, and the
+    seeds) still verifies and counts by key — the scheme didn't break."""
+    c = Contributor(tmp_path / "k")
+    env = _envelope(c, _learning())                  # no github_user
+    assert "github_user" not in env["signatures"][0]
+    assert C.ingest_verify(env, require_signature=True).corroboration == 1
+
+
+@needs_nacl
+def test_vendored_verify_handles_github_user(tmp_path):
+    """Parity: the CI verifier counts account-bound signatures exactly like the
+    engine (one account/many keys → 1; swapped username → invalid)."""
+    v = _load_vendored_verify()
+    base = _learning()
+    env = _envelope(Contributor(tmp_path / "k1"), base, github_user="alice")
+    env = _co_sign(env, Contributor(tmp_path / "k2"), github_user="alice")  # same acct
+    valid, problems = v.signature_problems(env)
+    assert valid == 1 and not problems              # 2 keys, 1 account → 1
+    # distinct accounts → 2, still parity with engine
+    env2 = _co_sign(_envelope(Contributor(tmp_path / "k3"), base, github_user="x"),
+                    Contributor(tmp_path / "k4"), github_user="y")
+    v_valid, _ = v.signature_problems(env2)
+    assert v_valid == C.ingest_verify(env2, require_signature=True).corroboration == 2
+
+
+# ── CI identity gate: PR author must == the signature it adds ─────────────────
+
+@needs_nacl
+def test_ci_author_binding_rejects_signing_as_someone_else(tmp_path):
+    """The hard CI gate (pure-function part): a PR that adds a signature under a
+    github_user that isn't the PR author is rejected."""
+    v = _load_vendored_verify()
+    new_env = _envelope(Contributor(tmp_path / "k"), _learning(), github_user="alice")
+    # PR author 'alice' adding alice's signature → OK
+    assert v.check_author_binding(new_env, "alice", None) == []
+    # PR author 'mallory' adding alice's signature → REJECTED
+    probs = v.check_author_binding(new_env, "mallory", None)
+    assert probs and "may only add YOUR OWN" in probs[0]
+
+
+@needs_nacl
+def test_ci_author_binding_only_checks_newly_added(tmp_path):
+    """A PR that corroborates (adds bob to alice's existing learning) is checked
+    only on bob — alice's pre-existing signature isn't re-attributed to the PR author."""
+    v = _load_vendored_verify()
+    base_env = _envelope(Contributor(tmp_path / "k1"), _learning(), github_user="alice")
+    new_env = _co_sign(base_env, Contributor(tmp_path / "k2"), github_user="bob")
+    # PR author bob, base had alice → only bob is "newly added", and bob == author → OK
+    assert v.check_author_binding(new_env, "bob", base_env) == []
+    # but if the PR author were carol (not bob), the added bob-sig is rejected
+    assert v.check_author_binding(new_env, "carol", base_env)
+
+
+def test_ci_newly_added_identities_diff():
+    """newly_added_identities returns only accounts added vs base (no network)."""
+    v = _load_vendored_verify()
+    old = {"signatures": [{"public_key": "k1", "signature": "s", "github_user": "alice"}]}
+    new = {"signatures": [
+        {"public_key": "k1", "signature": "s", "github_user": "alice"},
+        {"public_key": "k2", "signature": "s2", "github_user": "bob"},
+    ]}
+    assert v.newly_added_identities(old, new) == ["bob"]
+    assert set(v.newly_added_identities(None, new)) == {"alice", "bob"}

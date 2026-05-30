@@ -49,12 +49,12 @@ jobs:
             python .github/scripts/verify.py --changed ${{ steps.changed.outputs.files }}
           fi
 
-      - name: Enforce append-only signatures (no corroboration downgrade)
+      - name: Build base/new file pairs (for append-only + identity checks)
+        id: pairs
         if: github.event_name == 'pull_request'
         run: |
-          # For every changed learning file, compare its signer set against the base
-          # version: signatures may only be ADDED, never removed/replaced. A newly
-          # added file has no base (git show fails) → treated as OK ('-' sentinel).
+          # For every changed learning file, stage its BASE version next to the NEW
+          # one. A newly added file has no base (git show fails) → '-' sentinel.
           BASE="${{ github.event.pull_request.base.sha }}"
           PAIRS=""
           mkdir -p "$RUNNER_TEMP/base"
@@ -66,9 +66,21 @@ jobs:
               PAIRS="$PAIRS - $f"
             fi
           done
-          if [ -n "$PAIRS" ]; then
-            python .github/scripts/verify.py --append-only $PAIRS
-          fi
+          echo "pairs=$PAIRS" >> "$GITHUB_OUTPUT"
+
+      - name: Enforce append-only signatures (no corroboration downgrade)
+        if: github.event_name == 'pull_request' && steps.pairs.outputs.pairs != ''
+        run: python .github/scripts/verify.py --append-only ${{ steps.pairs.outputs.pairs }}
+
+      - name: Enforce signer↔account binding (PR author == signer; Sybil resistance)
+        if: github.event_name == 'pull_request' && steps.pairs.outputs.pairs != ''
+        env:
+          GH_TOKEN: ${{ github.token }}   # lets the account-age check call the gh API
+        run: |
+          # Every signature this PR ADDS must be bound to the PR author's GitHub
+          # account (github_user inside the signed bytes), and the account must clear
+          # the age bar. This is what makes "N signers" mean "N real accounts".
+          python .github/scripts/verify.py --identity "${{ github.event.pull_request.user.login }}" ${{ steps.pairs.outputs.pairs }}
 
       - name: Verify all files (push to main)
         if: github.event_name == 'push'

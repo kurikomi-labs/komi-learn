@@ -25,6 +25,7 @@ class Config:
     pool_min_corroboration: int = 1
     pool_sync_hours: float = 12.0
     pool_auto_contribute: bool = False
+    pool_github_user: str = ""
 
     @property
     def pool_enabled(self) -> bool:

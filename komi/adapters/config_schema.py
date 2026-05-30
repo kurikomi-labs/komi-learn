@@ -34,6 +34,7 @@ ENV_MAP: dict[str, str] = {
     "KOMI_POOL_MIN_CORROBORATION": "pool_min_corroboration",
     "KOMI_POOL_SYNC_HOURS": "pool_sync_hours",
     "KOMI_POOL_AUTO_CONTRIBUTE": "pool_auto_contribute",
+    "KOMI_POOL_GITHUB_USER": "pool_github_user",
 }
 
 # config.json layout → flat Config attribute. Top-level keys + the nested pool.* block.
@@ -49,6 +50,7 @@ FILE_KEYS: dict[str, tuple] = {
     "pool_min_corroboration": ("pool", "min_corroboration"),
     "pool_sync_hours": ("pool", "sync_hours"),
     "pool_auto_contribute": ("pool", "auto_contribute"),
+    "pool_github_user": ("pool", "github_user"),
 }
 
 

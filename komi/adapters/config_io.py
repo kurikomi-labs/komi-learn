@@ -52,7 +52,7 @@ def save_raw(paths_mod, data: dict) -> bool:
 
 # Dotted keys map onto the nested config. Pool keys live under "pool.*".
 _POOL_KEYS = {"repo_url", "mode", "branch", "require_signature", "sync_hours",
-              "auto_contribute", "min_corroboration"}
+              "auto_contribute", "min_corroboration", "github_user"}
 _TOP_KEYS = {"nudge_turns", "recall_k", "distill_model"}
 # recall.semantic controls whether semantic recall is used even if the model is present
 _RECALL_KEYS = {"semantic"}

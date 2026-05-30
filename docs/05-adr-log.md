@@ -118,19 +118,22 @@ needs a re-sign pass (`resign_seeds.py`) — corroboration doesn't change that.
 reverts to binary verified/not. The authoritative-array rule is what keeps the
 identity-swap defense intact (legacy-field tampering is ignored; parity-tested).
 
-**⚠️ Known limitation — distinct key ≠ distinct person (Sybil).** A contributor key
-is an Ed25519 keypair generated locally for free; nothing binds it to a real-world
-or GitHub identity. So "N distinct valid signers" is only a *proxy* for "N
-independent people", and a single attacker can defeat it by minting N keys and
-signing the same content under each — fabricating a high corroboration count. This
-was flagged in the 3-persona security review (Critical). **Interim mitigation
-(shipped):** corroboration is a *soft, advisory* signal, never a hard trust gate —
-(a) the counted/displayed value is **clamped to `MAX_COUNTED_SIGNERS` (3)** in
-`count_corroboration` (mirrored in the CI verifier), so a key flood can't manufacture
-a runaway "×50 agree" cue; (b) recall only ever *filters/down-weights* on
-corroboration, never *admits* untrusted content it would otherwise exclude; (c) the
-recall bonus is bounded (≈0.11 max). **Proper fix (deferred to Phase 7):** bind each
-signature to an established GitHub account at the pool's CI boundary (account
-age/contribution heuristics + stored attestation), moving the Sybil cost to "create
-N aged GitHub accounts". Until then, the `[community ×N]` cue is framed to the model
-as a weak hint, not an identity-verified endorsement.
+**Sybil resistance — distinct key ≠ distinct person, so count distinct ACCOUNTS.**
+A contributor key is an Ed25519 keypair generated locally for free, so "N distinct
+keys" is forgeable: one attacker mints N keys and signs the same content under each
+to fabricate a high count. Flagged Critical in the 3-persona security review.
+**Fix (shipped, Phase 7):** each signature binds the contributor's GitHub username
+(`github_user`) *inside the signed message* (so it can't be swapped post-signature),
+and corroboration counts **distinct accounts, not keys** (`_identity` in
+`corroboration.py`) — one person's many keys under one account count once. The pool's
+CI enforces it: a `--identity` step requires every signature a PR *adds* to be bound
+to the **PR author's** account (hard fail otherwise) and clears an account-age bar
+(`--identity`/`check_author_binding` in the vendored `verify.py`; mirrored in the
+engine). Sybil now costs N established GitHub accounts that each open a PR, not N free
+keys. **Defense in depth retained:** the count is still clamped to
+`MAX_COUNTED_SIGNERS` (3) and recall only *filters/down-weights* on corroboration,
+never *admits* otherwise-excluded content; the recall bonus is bounded (≈0.11 max).
+**Back-compat:** `github_user` is added to the signed bytes only when non-empty, so
+every pre-Phase-7 signature (and the seeds) still verifies byte-identically; a legacy
+unbound signature still counts (by key) but earns no *account-verified* corroboration.
+A pool wanting the strong guarantee requires `github_user` via CI + branch protection.

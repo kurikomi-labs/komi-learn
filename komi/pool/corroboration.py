@@ -23,18 +23,22 @@ This module is the single source of truth for "extract the distinct valid
 signers from an envelope". The vendored CI verifier mirrors this logic; a parity
 test guards the two against drift.
 
-⚠️ Trust limitation (read before relying on the count). A contributor key is an
-Ed25519 keypair generated locally for free — it is NOT bound to any real-world or
-GitHub identity. So "N distinct public keys" is a proxy for "N independent people"
-that a single attacker can defeat by minting N keys and signing the same content
-under each (a Sybil attack). Until signer↔account binding exists (planned: enforce
-it at the pool's CI boundary, Phase 7), corroboration is treated as a *soft,
-advisory* signal, NOT a hard trust gate:
-  • the counted value is CLAMPED to ``MAX_COUNTED_SIGNERS`` so a flood of fake keys
-    cannot manufacture a runaway "×50 experts agree" cue, and
-  • recall only ever *down-weights/filters* on corroboration, never *admits*
-    untrusted content it would otherwise exclude.
-See docs/05-adr-log.md ADR-9.
+Sybil resistance (Phase 7 — signer↔GitHub-account binding). A contributor key is
+an Ed25519 keypair generated locally for free, so "N distinct keys" alone is
+forgeable: one attacker mints N keys and signs the same content under each. The fix
+is to bind each signature to a GitHub **account** (``github_user``, inside the
+signed message — see :func:`..contribute._signing_message`) and have the pool's CI
+enforce that the account matches the PR author and clears an age/activity bar.
+Distinctness is therefore counted **by account, not by key**: one person's many
+keys under one account count once. Sybil now costs N established GitHub accounts,
+not N free keys.
+
+Defense in depth remains: the counted value is still CLAMPED to
+``MAX_COUNTED_SIGNERS`` (so even an account-flood can't manufacture a runaway "×50"
+cue), and recall only ever *down-weights/filters* on corroboration, never *admits*
+untrusted content it would otherwise exclude. Legacy signatures with no
+``github_user`` still count (by key) but are NOT account-verified — a pool that
+wants the strong guarantee requires github_user via CI. See docs/05-adr-log.md ADR-9.
 """
 
 from __future__ import annotations
@@ -88,6 +92,7 @@ def envelope_signatures(envelope: dict) -> list[dict]:
                 "algo": s.get("algo", "unsigned"),
                 "public_key": pk,
                 "signature": s.get("signature") or "",
+                "github_user": (s.get("github_user") or "").strip().lstrip("@"),
             })
         return out
 
@@ -96,68 +101,85 @@ def envelope_signatures(envelope: dict) -> list[dict]:
     pk = signer.get("public_key") or ""
     sig = (envelope.get("learning", {}).get("provenance", {}) or {}).get("signature") or ""
     if pk:
-        out.append({"algo": signer.get("algo", "unsigned"),
-                    "public_key": pk, "signature": sig})
+        out.append({"algo": signer.get("algo", "unsigned"), "public_key": pk,
+                    "signature": sig, "github_user": ""})
     return out
+
+
+def _identity(sig: dict) -> str:
+    """The de-dup key for one signature: the GitHub ACCOUNT if bound, else the
+    public key. Counting by account is what makes corroboration Sybil-resistant —
+    one person's many keys under a single account collapse to one identity."""
+    gh = (sig.get("github_user") or "").strip().lstrip("@").lower()
+    return f"gh:{gh}" if gh else f"pk:{sig.get('public_key', '')}"
 
 
 def count_corroboration(
     envelope: dict,
     *,
-    sign_message: Callable[[dict, str], bytes],
+    sign_message: Callable[..., bytes],
     verify: Callable[[bytes, str, str], bool],
 ) -> int:
     """Number of DISTINCT contributors with a VALID signature over this learning.
 
-    ``sign_message(learning, public_key)`` rebuilds the exact bytes that signer
-    would have signed (content id + parents + origin + that signer's own key).
-    ``verify(message, signature_b64, public_key_b64)`` checks one Ed25519
-    signature. Both are injected so this module stays free of crypto/engine
+    ``sign_message(learning, public_key, github_user)`` rebuilds the exact bytes
+    that signer would have signed (content id + parents + origin + their pubkey +
+    their github_user). ``verify(message, signature_b64, public_key_b64)`` checks one
+    Ed25519 signature. Both are injected so this module stays free of crypto/engine
     imports and the CI verifier can pass its own equivalents.
 
-    A signature that doesn't verify (wrong key, tampered content, unsigned)
-    simply doesn't count — it can't drag the level down, but it can't pad it up
-    either. Distinctness is by public key (already de-duped by
-    :func:`envelope_signatures`).
+    A signature that doesn't verify (wrong key, tampered content, swapped username,
+    unsigned) simply doesn't count — it can't drag the level down, but it can't pad it
+    up either. **Distinctness is by IDENTITY** (:func:`_identity`): the GitHub account
+    when bound, else the public key — so one attacker's N keys under one account count
+    once (Sybil resistance), and even N accountless keys collapse only if they repeat.
 
-    The result is CLAMPED to :data:`MAX_COUNTED_SIGNERS`: because keys are free to
-    mint, counting past a small number would let a Sybil flood fabricate trust (see
-    the module docstring). We stop verifying once the clamp is reached — also a
-    short-circuit that bounds work."""
+    The result is CLAMPED to :data:`MAX_COUNTED_SIGNERS` as defense in depth. We stop
+    once the clamp is reached — also a short-circuit that bounds work."""
     learning = envelope.get("learning", {})
-    n = 0
+    counted: set[str] = set()
     for s in envelope_signatures(envelope):
-        pk, sig = s["public_key"], s["signature"]
+        pk, sig, gh = s["public_key"], s["signature"], s.get("github_user", "")
         if not sig:
             continue
-        if verify(sign_message(learning, pk), sig, pk):
-            n += 1
-            if n >= MAX_COUNTED_SIGNERS:
+        ident = _identity(s)
+        if ident in counted:
+            continue  # same account/key already counted — no double-vote
+        if verify(sign_message(learning, pk, gh), sig, pk):
+            counted.add(ident)
+            if len(counted) >= MAX_COUNTED_SIGNERS:
                 break
-    return n
+    return len(counted)
 
 
 def merge_signature(envelope: dict, new_sig: dict) -> Optional[dict]:
     """Return a copy of ``envelope`` with ``new_sig`` appended to its signatures,
-    or ``None`` if that signer already endorses it (a true no-op).
+    or ``None`` if that *identity* already endorses it (a true no-op).
 
-    ``new_sig`` is ``{algo, public_key, signature}``. The result always carries an
-    explicit ``signatures`` array (upgrading a legacy file in place) and keeps the
-    legacy ``signer`` / ``provenance.signature`` fields pointed at signatures[0]
-    for human-readable diffs and old readers."""
+    ``new_sig`` is ``{algo, public_key, signature, github_user?}``. No-op detection
+    is by IDENTITY (:func:`_identity`) — the GitHub account when present, else the
+    key — so the same person can't pad corroboration by re-signing under a fresh key
+    from the same account. The result always carries an explicit ``signatures`` array
+    (upgrading a legacy file in place) and keeps the legacy ``signer`` /
+    ``provenance.signature`` fields pointed at signatures[0] for old readers."""
     existing = envelope_signatures(envelope)
     pk = new_sig.get("public_key") or ""
     if not pk:
         return None
-    if any(s["public_key"] == pk for s in existing):
-        return None  # already corroborated by this signer
+    gh = (new_sig.get("github_user") or "").strip().lstrip("@")
+    new_ident = _identity({"public_key": pk, "github_user": gh})
+    if any(_identity(s) == new_ident for s in existing):
+        return None  # already corroborated by this identity (account or key)
 
     merged = dict(envelope)
-    sigs = existing + [{
-        "algo": new_sig.get("algo", "unsigned"),
-        "public_key": pk,
-        "signature": new_sig.get("signature") or "",
-    }]
+    entry = {"algo": new_sig.get("algo", "unsigned"), "public_key": pk,
+             "signature": new_sig.get("signature") or ""}
+    if gh:
+        entry["github_user"] = gh
+    sigs = existing + [entry]
+    # normalize: envelope_signatures adds a github_user key to every entry (possibly
+    # ""), but the stored array should omit empty github_user for clean diffs.
+    sigs = [{k: v for k, v in s.items() if not (k == "github_user" and not v)} for s in sigs]
     merged["signatures"] = sigs
     # keep legacy mirror fields aligned to the primary signer (signatures[0])
     primary = sigs[0]
