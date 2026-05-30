@@ -25,11 +25,26 @@ def home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def working_model(monkeypatch):
-    """Mock verify_model() to a verified pass, so install proceeds past the gate."""
-    ok = reqmod.Requirement("model", True, True, "mock model verified")
-    monkeypatch.setattr(reqmod, "verify_model", lambda **kw: ok)
-    # doctor and setup import verify_model from this module at call time
-    return ok
+    """Make install proceed past the strict gate, regardless of what's installed on
+    the test runner. We mock BOTH verify_model() AND collect(): a bare CI runner has
+    no `claude` CLI (a REQUIRED check), so mocking only the model still leaves the
+    gate tripped and every post-gate test fails (this is what CI caught). Mocking
+    collect() to return all-passing required reqs makes these tests hermetic — they
+    exercise post-gate install behavior, not the host's environment."""
+    ok_model = reqmod.Requirement("model", True, True, "mock model verified")
+    monkeypatch.setattr(reqmod, "verify_model", lambda **kw: ok_model)
+
+    def _all_pass(*, api_key=None, pool=False):
+        return [
+            reqmod.Requirement("python", True, True, "mock python ok"),
+            reqmod.Requirement("claude-cli", True, True, "mock claude CLI ok"),
+            ok_model,
+            reqmod.Requirement("git", True, False, "mock git ok"),
+            reqmod.Requirement("signing", True, False, "mock signing ok"),
+        ]
+    monkeypatch.setattr(reqmod, "collect", _all_pass)
+    # setup.py imports these names from reqmod at call time, so patching reqmod is enough
+    return ok_model
 
 
 def _settings(home):
@@ -83,11 +98,16 @@ def test_install_creates_hooks_and_config(home, working_model):
 
 
 def test_install_uses_absolute_python_path(home, working_model):
+    import os
     setup.install()
     s = _settings(home)
     cmd = next(h["command"] for e in s["hooks"]["SessionStart"] for h in e["hooks"]
                if "komi.adapters" in h["command"])
-    assert cmd.split()[0] not in ("python", "python3", '"python"')
+    # the contract is an ABSOLUTE interpreter path (so the hook can't break on a
+    # PATH mismatch), not merely "not the literal string python". Strip surrounding
+    # quotes the command may add for paths-with-spaces, then require absoluteness.
+    interp = cmd.split(" -m ")[0].strip().strip('"')
+    assert os.path.isabs(interp), f"hook interpreter not absolute: {interp!r}"
 
 
 def test_install_merges_not_clobbers(home, working_model):
@@ -122,7 +142,10 @@ def test_install_self_heals_stale_hook_command(home, working_model):
     cmds = [h["command"] for e in s["hooks"]["SessionStart"] for h in e["hooks"]
             if "komi.adapters" in h["command"]]
     assert len(cmds) == 1
-    assert cmds[0].split()[0] not in ("python", "python3")
+    # the stale bare-`python` command must have been upgraded to an absolute path
+    import os
+    interp = cmds[0].split(" -m ")[0].strip().strip('"')
+    assert os.path.isabs(interp), f"stale command not healed to absolute path: {interp!r}"
 
 
 def test_install_stores_api_key(home, working_model):
