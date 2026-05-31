@@ -239,7 +239,7 @@ def _install_hooks() -> StepResult:
                 return StepResult("hooks", False, "settings.json is not a JSON object",
                                   fix="Fix settings.json to be a JSON object, then re-run.")
         hooks = data.setdefault("hooks", {})
-        added, refreshed = [], []
+        added, refreshed, kept_capture = [], [], []
         for event in HOOK_EVENTS:
             arr = hooks.setdefault(event, [])
             want = _hook_command(_HOOK_MODULES[event])
@@ -256,6 +256,11 @@ def _install_hooks() -> StepResult:
             if existing is None:
                 arr.append({"hooks": [{"type": "command", "command": want}]})
                 added.append(event)
+            elif "hook_capture" in (existing.get("command") or ""):
+                # Diagnostic capture is ON for this event. Do NOT silently overwrite
+                # it with the normal hook — that would disable the recorder mid-test,
+                # reported as a benign "refreshed". Leave it; tell the user.
+                kept_capture.append(event)
             elif existing.get("command") != want:
                 # self-heal: a stale command (e.g. bare 'python', or an old repo
                 # path) gets upgraded to the canonical absolute-interpreter form.
@@ -270,6 +275,9 @@ def _install_hooks() -> StepResult:
             bits.append(f"added: {', '.join(added)}")
         if refreshed:
             bits.append(f"refreshed: {', '.join(refreshed)}")
+        if kept_capture:
+            bits.append(f"capture left ON for {', '.join(kept_capture)} "
+                        "(run `komi-learn capture off` to restore normal hooks)")
         detail += f" ({'; '.join(bits)})" if bits else " (already current)"
         return StepResult("hooks", True, detail)
     except Exception as e:
@@ -445,24 +453,35 @@ def set_capture(enabled: bool) -> StepResult:
         data = json.loads(sp.read_text(encoding="utf-8"))
         hooks = data.setdefault("hooks", {})
         target = _CAPTURE_COMMANDS if enabled else _NORMAL_COMMANDS
+
+        # Only ever RE-POINT komi's existing hooks; never create them. If komi isn't
+        # installed (no komi hook in any target event), refuse — otherwise `capture
+        # on/off` after `uninstall` (which strips komi entries but leaves the file)
+        # would silently re-install the hooks the user just removed.
+        def _has_komi(event):
+            return any(_is_komi_command(h.get("command", ""))
+                       for entry in hooks.get(event, []) for h in entry.get("hooks", []))
+        if not any(_has_komi(ev) for ev in target):
+            return StepResult("capture", False,
+                              "komi-learn isn't installed (no hooks found) — run komi-learn install first")
+
         changed = []
         for event, mod in target.items():
             want = _hook_command_raw(mod)
             arr = hooks.setdefault(event, [])
-            found = False
             for entry in arr:
+                done = False
                 for h in entry.get("hooks", []):
                     if _is_komi_command(h.get("command", "")):
                         if h.get("command") != want:
                             h["command"] = want
                             changed.append(event)
-                        found = True
+                        done = True
                         break
-                if found:
+                if done:
                     break
-            if not found:
-                arr.append({"hooks": [{"type": "command", "command": want}]})
-                changed.append(event)
+            # If this particular event has no komi hook, SKIP it — do not append.
+            # (set_capture re-points; install is what creates hooks.)
         if not _atomic_write_json(sp, data):
             return StepResult("capture", False, "failed to write settings.json")
         state = "ON" if enabled else "OFF"

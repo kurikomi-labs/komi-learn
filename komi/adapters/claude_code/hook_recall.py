@@ -56,7 +56,8 @@ def main(default_event: str = "") -> int:
     # that honors both channels the block would otherwise be injected twice. If a
     # sibling event already served THIS compaction moments ago, no-op.
     if is_compaction and _compaction_already_served(payload, event):
-        _emit({}, note="komi recall: compaction already re-injected by a sibling event")
+        _emit({}, note="komi recall: compaction already re-injected by a sibling event",
+              event=event)
         return 0
 
     try:
@@ -68,20 +69,21 @@ def main(default_event: str = "") -> int:
         block = build_block(cwd, payload, fresh=not is_compaction)
     except Exception as e:
         # Never break the session because recall failed — emit nothing.
-        _emit({}, note=f"komi recall skipped: {e}")
+        _emit({}, note=f"komi recall skipped: {e}", event=event)
         return 0
 
-    # The emit path itself must never break the session (e.g. a BrokenPipeError if
-    # the host closed the hook's stdout early) — degrade to a harmless no-op.
+    if not block:
+        _emit({}, event=event)
+        return 0
+    # _emit_block is internally format-correct per event; the no-op/diagnostic emits
+    # above go through _emit, which is now event-aware + pipe-safe (suppresses the
+    # JSON diagnostic on PostCompact, where stdout is appended verbatim to context).
     try:
-        if not block:
-            _emit({})
-            return 0
         _emit_block(block, event, is_compaction)
         if is_compaction:
             _record_compaction_served(payload, event)
     except Exception:
-        pass
+        pass    # a broken pipe / write error must never wedge the session
     return 0
 
 
@@ -138,7 +140,7 @@ def _compaction_already_served(payload: dict, event: str) -> bool:
     import time
     key = _compaction_key(payload)
     try:
-        state = paths.update_state(lambda s: s) or {}
+        state = paths.read_state()       # read-only: no lock-and-rewrite
     except Exception:
         return False
     last = state.get("last_compact_reinject") or {}
@@ -328,11 +330,26 @@ def _read_stdin_json() -> dict:
         return {}
 
 
-def _emit(obj: dict, *, note: str = "") -> None:
+def _emit(obj: dict, *, note: str = "", event: str = "") -> None:
+    """Emit a no-op / diagnostic result. Event-aware and pipe-safe:
+
+    - For PostCompact, stdout is appended VERBATIM to the model's context (its
+      documented add-to-context path), so a diagnostic JSON blob like
+      ``{"_note": ...}`` would pollute the context. Emit nothing on PostCompact.
+    - For SessionStart, additionalContext comes from a structured JSON object, so a
+      bare ``{}`` (optionally with a ``_note``) is the correct no-op.
+    - A closed stdout (BrokenPipeError, host hung up early) must never wedge the
+      session — swallow any write error.
+    """
+    if event == "PostCompact":
+        return
     if note:
         obj = {**obj, "_note": note}
-    sys.stdout.write(json.dumps(obj))
-    sys.stdout.flush()
+    try:
+        sys.stdout.write(json.dumps(obj))
+        sys.stdout.flush()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

@@ -389,7 +389,7 @@ def _verify_agent_updated(expected: str) -> None:
         return
 
     import os as _os
-    stale = []
+    stale = []   # (interp, version, same_as_cli)
     for interp in interps:
         ver = updater.installed_version_via_subprocess(interp)
         same_as_cli = _os.path.normcase(interp) == _os.path.normcase(sys.executable)
@@ -397,15 +397,28 @@ def _verify_agent_updated(expected: str) -> None:
             who = "this interpreter" if same_as_cli else interp
             _p(f"  ✓ agent behavior updated — hooks run {expected} (via {who}).")
         else:
-            stale.append((interp, ver))
+            stale.append((interp, ver, same_as_cli))
 
-    if stale:
+    # A stale entry on the SAME interpreter the CLI just upgraded isn't a
+    # "different Python" problem — the upgrade simply didn't land (a no-op, a pinned
+    # older constraint, or a permissions issue). Diagnose those two cases distinctly
+    # so the message isn't self-contradictory (telling the user their Python differs
+    # from itself, with a fix command identical to the one that just ran).
+    same = [(i, v) for i, v, s in stale if s]
+    other = [(i, v) for i, v, s in stale if not s]
+    if same:
+        for interp, ver in same:
+            _p(f"  ! the upgrade did not land in this interpreter — it still imports "
+               f"komi-learn {ver or 'nothing'}.")
+        _p("    Retry (possibly with elevated permissions), or check for a pinned "
+           "version constraint. The agent uses this same interpreter, so its behavior "
+           "is unchanged until the upgrade succeeds.")
+    if other:
         _p("  ! the coding agent's hooks use a DIFFERENT Python than the one just "
            "upgraded — the agent is still on the old code:")
-        for interp, ver in stale:
+        for interp, ver in other:
             _p(f"      {interp}  (imports komi-learn {ver or 'not installed'})")
-        # one clear fix line per stale interpreter
-        for interp, _ in stale:
+        for interp, _ in other:
             _p(f"      fix:  \"{interp}\" -m pip install --upgrade {updater.DIST_NAME}")
         _p("    Then the agent picks up the new behavior on its next hook firing.")
 

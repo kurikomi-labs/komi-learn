@@ -251,8 +251,10 @@ def test_hook_interpreters_extracts_pinned_python(home):
     interps = setup.hook_interpreters()
     # the installer pins sys.executable; that's the one the agent runs under
     assert len(interps) == 1
-    import os
-    assert os.path.normcase(interps[0]).rstrip('"').lstrip('"') or interps[0]
+    import os, sys
+    # the extracted interpreter must actually equal sys.executable (quotes stripped,
+    # case-normalized on Windows) — NOT just be non-empty
+    assert os.path.normcase(interps[0].strip('"')) == os.path.normcase(sys.executable)
 
 
 def test_hook_interpreters_empty_without_install(home):
@@ -315,3 +317,124 @@ def test_capture_on_off_repoints_hooks(home):
     assert any("hook_recall" in c for c in ss)
     assert any("hook_compact" in c for c in pc)
     assert not any("hook_capture" in c for c in ss + pc)
+
+
+# ── ultrareview fixes ─────────────────────────────────────────────────────────
+
+def test_emit_suppressed_on_postcompact():
+    """_emit must write NOTHING for PostCompact (its stdout is appended verbatim to
+    context — a diagnostic JSON blob would be noise)."""
+    out = io.StringIO()
+    with mock.patch("sys.stdout", out):
+        hr._emit({}, note="diagnostic", event="PostCompact")
+    assert out.getvalue() == ""
+
+
+def test_emit_writes_json_on_sessionstart():
+    out = io.StringIO()
+    with mock.patch("sys.stdout", out):
+        hr._emit({}, note="why", event="SessionStart")
+    obj = json.loads(out.getvalue())
+    assert obj["_note"] == "why"
+
+
+def test_emit_swallows_broken_pipe():
+    """A closed stdout must not raise out of _emit."""
+    class _Boom:
+        def write(self, *a): raise BrokenPipeError("closed")
+        def flush(self): raise BrokenPipeError("closed")
+    with mock.patch("sys.stdout", _Boom()):
+        hr._emit({}, event="SessionStart")   # must not raise
+
+
+def test_dedup_path_postcompact_emits_nothing(isolated_state):
+    """The sibling-dedup no-op on PostCompact must emit literally nothing (not a
+    JSON _note that would pollute the verbatim-stdout context)."""
+    hrl = isolated_state
+    payload = {"hook_event_name": "PostCompact", "session_id": "Z", "cwd": "."}
+    out = io.StringIO()
+    with mock.patch.object(hrl, "build_block", lambda c, p, **k: "<komi-recall>x</komi-recall>"), \
+         mock.patch.object(hrl, "_compaction_already_served", lambda p, e: True), \
+         mock.patch.object(hrl, "_read_stdin_json", lambda: payload), \
+         mock.patch("sys.stdout", out):
+        rc = hrl.main()
+    assert rc == 0
+    assert out.getvalue() == ""
+
+
+def test_hook_capture_bounds_stdin(monkeypatch, tmp_path):
+    """hook_capture must apply the same stdin cap as hook_recall, then no-op safely."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    from komi.adapters.claude_code import paths, hook_capture
+    importlib.reload(paths)
+    importlib.reload(hook_capture)
+    huge = "x" * (hr._MAX_STDIN_BYTES + 100)
+    monkeypatch.setattr(hook_capture.sys, "stdin", io.StringIO(huge))
+    # capture records the (empty, over-cap) payload and delegates without exploding
+    with mock.patch("sys.stdout", io.StringIO()):
+        rc = hook_capture.main(default_event="SessionStart")
+    assert rc == 0
+    # the capture record should reflect an empty/no-op raw (over the cap)
+    cap = hook_capture.capture_path()
+    rec = json.loads(cap.read_text(encoding="utf-8").splitlines()[-1])
+    assert rec["raw_len"] == 0
+
+
+def test_install_does_not_disable_active_capture(home):
+    """Re-running install while capture is ON must NOT overwrite the capture hooks."""
+    setup = home
+    setup._install_hooks()
+    setup.set_capture(True)
+    r = setup._install_hooks()
+    data = json.loads(setup.settings_path().read_text(encoding="utf-8"))
+    ss = [h["command"] for e in data["hooks"]["SessionStart"] for h in e["hooks"]]
+    pc = [h["command"] for e in data["hooks"]["PostCompact"] for h in e["hooks"]]
+    assert any("hook_capture" in c for c in ss)        # still capturing
+    assert any("hook_capture" in c for c in pc)
+    assert "capture left ON" in r.detail               # and the user is told
+
+
+def test_set_capture_refuses_when_not_installed(home):
+    """capture on/off after uninstall (komi stripped, settings.json kept) must NOT
+    silently re-install the hooks."""
+    setup = home
+    setup._install_hooks()
+    setup.uninstall(keep_data=True)        # removes komi hooks, leaves settings.json
+    r = setup.set_capture(True)
+    assert not r.ok
+    assert "isn't installed" in r.detail
+    # and no komi hooks were created
+    data = json.loads(setup.settings_path().read_text(encoding="utf-8"))
+    allcmds = [h.get("command", "") for ev in data.get("hooks", {}).values()
+               for e in ev for h in e.get("hooks", [])]
+    assert not any("komi.adapters.claude_code" in c for c in allcmds)
+
+
+def test_verify_agent_updated_same_python_not_called_different(home, monkeypatch, capsys):
+    """When the upgrade didn't land but the hook interpreter IS sys.executable, the
+    message must say 'did not land in this interpreter' — NOT 'DIFFERENT Python'."""
+    from komi import cli, updater
+    import komi.adapters.claude_code.setup as setup_mod
+    import sys
+    monkeypatch.setattr(setup_mod, "hook_interpreters", lambda: [sys.executable])
+    monkeypatch.setattr(updater, "installed_version_via_subprocess",
+                        lambda python=None: "0.3.0")     # stale: upgrade didn't land
+    cli._verify_agent_updated("0.4.0")
+    out = capsys.readouterr().out
+    assert "did not land in this interpreter" in out
+    assert "DIFFERENT Python" not in out
+
+
+def test_read_state_does_not_write(monkeypatch, tmp_path):
+    """paths.read_state must not modify state.json (mtime unchanged)."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    from komi.adapters.claude_code import paths
+    importlib.reload(paths)
+    paths.update_state(lambda s: s.__setitem__("k", 1))   # create the file
+    sp = paths.state_path()
+    import os
+    before = os.stat(sp).st_mtime_ns
+    got = paths.read_state()
+    after = os.stat(sp).st_mtime_ns
+    assert got.get("k") == 1
+    assert before == after                  # read_state wrote nothing

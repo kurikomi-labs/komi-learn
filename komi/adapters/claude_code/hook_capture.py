@@ -61,16 +61,20 @@ def _capture(entry_event: str, raw: str) -> None:
 def main(default_event: str = "") -> int:
     # Read stdin ONCE, capture it, then hand the same payload to the real recall
     # path so behavior is unchanged. We re-feed stdin by monkeypatching the reader.
+    # Mirror hook_recall's bound (set_capture re-points the real events here, so the
+    # cap must not be lost on these routes).
+    from . import hook_recall
     raw = ""
     try:
-        raw = sys.stdin.read()
+        raw = sys.stdin.read(hook_recall._MAX_STDIN_BYTES + 1)
+        if len(raw) > hook_recall._MAX_STDIN_BYTES:
+            raw = ""                      # oversized/garbage → safe no-op
     except Exception:
         raw = ""
     _capture(default_event or "SessionStart", raw)
 
     # Delegate to the normal recall, feeding it the bytes we already consumed.
     try:
-        from . import hook_recall
         hook_recall._read_stdin_json = lambda: _safe_json(raw)  # type: ignore
         return hook_recall.main(default_event=default_event)
     except Exception:

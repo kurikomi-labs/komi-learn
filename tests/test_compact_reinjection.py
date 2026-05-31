@@ -76,30 +76,62 @@ def test_legacy_payload_behaves_as_session_start():
     assert _BLOCK in obj["hookSpecificOutput"]["additionalContext"]
 
 
-def test_empty_block_emits_nothing_actionable():
+def test_empty_block_postcompact_emits_literally_nothing():
     out = io.StringIO()
     with mock.patch.object(hr, "build_block", lambda cwd, p, **k: ""), \
          mock.patch.object(hr, "_maybe_sync_pool", lambda: None), \
+         mock.patch.object(hr, "_compaction_already_served", lambda p, e: False), \
+         mock.patch.object(hr, "_record_compaction_served", lambda p, e: None), \
          mock.patch.object(hr, "_read_stdin_json",
                            lambda: {"hook_event_name": "PostCompact", "trigger": "auto"}), \
          mock.patch("sys.stdout", out):
         hr.main()
-    # nothing to inject → emit an empty JSON object, never a stray block
+    # PostCompact stdout is appended verbatim to context — a diagnostic "{}" would
+    # be noise, so emit literally nothing.
+    assert out.getvalue() == ""
+
+
+def test_empty_block_sessionstart_emits_empty_json():
+    out = io.StringIO()
+    with mock.patch.object(hr, "build_block", lambda cwd, p, **k: ""), \
+         mock.patch.object(hr, "_maybe_sync_pool", lambda: None), \
+         mock.patch.object(hr, "_read_stdin_json",
+                           lambda: {"hook_event_name": "SessionStart", "source": "startup"}), \
+         mock.patch("sys.stdout", out):
+        hr.main()
+    # SessionStart additionalContext is structured JSON → empty object is the no-op
     assert out.getvalue() == "{}"
 
 
 def test_recall_failure_never_breaks_session():
+    """On SessionStart a recall failure emits a JSON no-op with a _note diagnostic."""
     def boom(cwd, p, **k):
         raise RuntimeError("store exploded")
     out = io.StringIO()
     with mock.patch.object(hr, "build_block", boom), \
          mock.patch.object(hr, "_maybe_sync_pool", lambda: None), \
          mock.patch.object(hr, "_read_stdin_json",
-                           lambda: {"hook_event_name": "PostCompact"}), \
+                           lambda: {"hook_event_name": "SessionStart", "source": "startup"}), \
          mock.patch("sys.stdout", out):
         rc = hr.main()
     assert rc == 0                                   # graceful, non-fatal
     assert "_note" in json.loads(out.getvalue())     # records why it skipped
+
+
+def test_recall_failure_postcompact_emits_nothing():
+    """On PostCompact the same failure must emit literally nothing (no JSON diagnostic
+    polluting the verbatim-stdout context) and still be non-fatal."""
+    def boom(cwd, p, **k):
+        raise RuntimeError("store exploded")
+    out = io.StringIO()
+    with mock.patch.object(hr, "build_block", boom), \
+         mock.patch.object(hr, "_compaction_already_served", lambda p, e: False), \
+         mock.patch.object(hr, "_read_stdin_json",
+                           lambda: {"hook_event_name": "PostCompact"}), \
+         mock.patch("sys.stdout", out):
+        rc = hr.main()
+    assert rc == 0
+    assert out.getvalue() == ""
 
 
 def test_compaction_skips_background_maintenance():

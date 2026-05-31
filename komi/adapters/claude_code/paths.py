@@ -124,6 +124,41 @@ def update_state(mutator):
                 fh.close()
 
 
+def read_state() -> dict:
+    """Read state.json under the shared lock WITHOUT writing it back.
+
+    ``update_state`` always performs a full read-modify-write (it re-serializes and
+    atomically replaces the file even for an identity mutator), which is wasteful and
+    serializes concurrent sessions for a pure read. Callers that only need to inspect
+    state (e.g. the compaction dedup check) use this instead. The lock is still held
+    briefly so a reader never observes a torn mid-``os.replace`` write. Best-effort:
+    returns {} on any error.
+    """
+    import json
+
+    sp = state_path()
+    if not sp.exists():
+        return {}
+    lock = sp.with_suffix(".lock")
+    fh = None
+    try:
+        fh = open(lock, "a+")
+        _lock_file(fh)
+        try:
+            data = json.loads(sp.read_text(encoding="utf-8")) or {}
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, OSError):
+            return {}
+    except Exception:
+        return {}
+    finally:
+        if fh is not None:
+            try:
+                _unlock_file(fh)
+            finally:
+                fh.close()
+
+
 def _lock_file(fh) -> None:
     """Acquire an exclusive advisory lock (blocking). No-op if locking is unavailable."""
     try:
@@ -153,4 +188,5 @@ def _unlock_file(fh) -> None:
 __all__ = [
     "claude_home", "personal_root", "project_root", "index_path",
     "queue_dir", "outbox_dir", "inbox_dir", "keys_dir", "state_path", "update_state",
+    "read_state",
 ]
