@@ -362,8 +362,52 @@ def cmd_update(args) -> int:
         if updater.is_newer(latest, new):
             _p(f"  note: PyPI shows {latest} but the install reports {new} — "
                "you may be in a different environment than expected.")
-    _p("  If this release added hook events, refresh them with:  komi-learn install")
+
+    # The CLI upgrade above touched THIS interpreter. But the coding agent's behavior
+    # (recall/distill/compaction) is whatever the installed HOOKS import — a possibly
+    # different Python. Verify the new code actually reached the agent, not just the
+    # CLI, so "the behavior is updated" is a fact, not a hope.
+    _verify_agent_updated(new or latest)
     return 0
+
+
+def _verify_agent_updated(expected: str) -> None:
+    """Confirm the agent's hook interpreter(s) now import the upgraded komi-learn.
+
+    The hooks run `python -m komi.adapters.claude_code....` with a pinned interpreter
+    (see setup._python_cmd). `pip install -U` only upgrades the env it ran in; if the
+    hooks point at a different Python, the CLI is new but the AGENT is still old. We
+    ask each hook interpreter what version it imports and report the truth."""
+    from komi import updater
+    try:
+        from komi.adapters.claude_code import setup
+        interps = setup.hook_interpreters()
+    except Exception:
+        return
+    if not interps:
+        _p("  (no Claude Code hooks installed yet — run  komi-learn install  to enable the agent.)")
+        return
+
+    import os as _os
+    stale = []
+    for interp in interps:
+        ver = updater.installed_version_via_subprocess(interp)
+        same_as_cli = _os.path.normcase(interp) == _os.path.normcase(sys.executable)
+        if ver == expected:
+            who = "this interpreter" if same_as_cli else interp
+            _p(f"  ✓ agent behavior updated — hooks run {expected} (via {who}).")
+        else:
+            stale.append((interp, ver))
+
+    if stale:
+        _p("  ! the coding agent's hooks use a DIFFERENT Python than the one just "
+           "upgraded — the agent is still on the old code:")
+        for interp, ver in stale:
+            _p(f"      {interp}  (imports komi-learn {ver or 'not installed'})")
+        # one clear fix line per stale interpreter
+        for interp, _ in stale:
+            _p(f"      fix:  \"{interp}\" -m pip install --upgrade {updater.DIST_NAME}")
+        _p("    Then the agent picks up the new behavior on its next hook firing.")
 
 
 def cmd_capture(args) -> int:

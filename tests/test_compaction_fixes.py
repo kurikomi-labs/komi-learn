@@ -233,6 +233,70 @@ def test_uninstall_keeps_lookalike_user_hook(home):
 
 # ── capture toggle ────────────────────────────────────────────────────────────
 
+# ── update verifies the AGENT's hook interpreter, not just the CLI ────────────
+
+def test_interpreter_from_command_quoted_and_plain(home):
+    setup = home
+    assert setup._interpreter_from_command(
+        '"C:\\Program Files\\Python\\python.exe" -m komi.adapters.claude_code.hook_recall') \
+        == "C:\\Program Files\\Python\\python.exe"
+    assert setup._interpreter_from_command(
+        '/usr/bin/python3 -m komi.adapters.claude_code.hook_compact --compact') == "/usr/bin/python3"
+    assert setup._interpreter_from_command("") is None
+
+
+def test_hook_interpreters_extracts_pinned_python(home):
+    setup = home
+    setup._install_hooks()
+    interps = setup.hook_interpreters()
+    # the installer pins sys.executable; that's the one the agent runs under
+    assert len(interps) == 1
+    import os
+    assert os.path.normcase(interps[0]).rstrip('"').lstrip('"') or interps[0]
+
+
+def test_hook_interpreters_empty_without_install(home):
+    setup = home
+    assert setup.hook_interpreters() == []
+
+
+def test_verify_agent_updated_match(home, monkeypatch, capsys):
+    from komi import cli, updater
+    import komi.adapters.claude_code.setup as setup_mod
+    monkeypatch.setattr(setup_mod, "hook_interpreters", lambda: ["/usr/bin/python3"])
+    monkeypatch.setattr(updater, "installed_version_via_subprocess",
+                        lambda python=None: "0.4.0")
+    cli._verify_agent_updated("0.4.0")
+    out = capsys.readouterr().out
+    assert "agent behavior updated" in out
+    assert "0.4.0" in out
+
+
+def test_verify_agent_updated_detects_stale_other_python(home, monkeypatch, capsys):
+    """The critical case: hooks pinned to a DIFFERENT Python that still imports the
+    old version — update must loudly say the agent is NOT updated + give the fix."""
+    from komi import cli, updater
+    import komi.adapters.claude_code.setup as setup_mod
+    monkeypatch.setattr(setup_mod, "hook_interpreters", lambda: ["/other/venv/python"])
+    # that interpreter reports the OLD version
+    monkeypatch.setattr(updater, "installed_version_via_subprocess",
+                        lambda python=None: "0.3.0" if python == "/other/venv/python" else "0.4.0")
+    cli._verify_agent_updated("0.4.0")
+    out = capsys.readouterr().out
+    assert "DIFFERENT Python" in out
+    assert "/other/venv/python" in out
+    assert "pip install --upgrade" in out          # exact fix printed
+
+
+def test_verify_agent_updated_no_hooks(home, monkeypatch, capsys):
+    from komi import cli
+    import komi.adapters.claude_code.setup as setup_mod
+    monkeypatch.setattr(setup_mod, "hook_interpreters", lambda: [])
+    cli._verify_agent_updated("0.4.0")
+    out = capsys.readouterr().out
+    assert "no Claude Code hooks" in out
+
+
 def test_capture_on_off_repoints_hooks(home):
     setup = home
     setup._install_hooks()

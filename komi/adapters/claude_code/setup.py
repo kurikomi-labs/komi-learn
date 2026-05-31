@@ -53,6 +53,52 @@ def _is_komi_command(command: str) -> bool:
     return bool(_HOOK_CMD_RE.search(command or ""))
 
 
+def _interpreter_from_command(command: str) -> Optional[str]:
+    """Extract the interpreter (the leading token) from a hook command line.
+
+    Commands look like ``"C:\\Program Files\\Python\\python.exe" -m komi...`` or
+    ``/usr/bin/python3 -m komi...``. The exe may be double-quoted (it is when the
+    path contains spaces — see _python_cmd). We can't use shlex (it mangles Windows
+    backslashes in posix mode), so parse the first token directly: a quoted span, or
+    everything up to the first space."""
+    s = (command or "").strip()
+    if not s:
+        return None
+    if s[0] == '"':
+        end = s.find('"', 1)
+        return s[1:end] if end != -1 else None
+    return s.split(" ", 1)[0]
+
+
+def hook_interpreters() -> list:
+    """The distinct Python interpreters the installed komi hooks actually run under.
+
+    `komi-learn update` upgrades the package for the interpreter running the CLI;
+    the AGENT's behavior, though, is whatever these hook interpreters import. They're
+    normally the same, but can diverge (CLI in one venv, hooks pinned to another). We
+    surface them so update can VERIFY the new code reached the agent, not just the CLI.
+    Returns [] if there's no settings.json or no komi hooks.
+    """
+    sp = settings_path()
+    out = []
+    try:
+        if not sp.exists():
+            return []
+        data = json.loads(sp.read_text(encoding="utf-8"))
+        hooks = data.get("hooks", {})
+        for event in hooks.values():
+            for entry in event:
+                for h in entry.get("hooks", []):
+                    cmd = h.get("command", "")
+                    if _is_komi_command(cmd):
+                        interp = _interpreter_from_command(cmd)
+                        if interp and interp not in out:
+                            out.append(interp)
+    except Exception:
+        return out
+    return out
+
+
 @dataclass
 class StepResult:
     name: str
@@ -430,4 +476,4 @@ def set_capture(enabled: bool) -> StepResult:
 
 
 __all__ = ["install", "uninstall", "InstallReport", "StepResult", "settings_path",
-           "HOOK_EVENTS", "set_capture"]
+           "HOOK_EVENTS", "set_capture", "hook_interpreters"]

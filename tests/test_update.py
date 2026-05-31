@@ -177,7 +177,11 @@ def _args(**kw):
 
 def _capture(fn, *a):
     out = io.StringIO()
-    with mock.patch("sys.stdout", out):
+    # Neuter the agent-interpreter verification here — it reads the real settings.json
+    # and shells the real hook Python. cmd_update's upgrade-decision logic is what
+    # these tests cover; _verify_agent_updated has its own dedicated tests.
+    with mock.patch.object(cli, "_verify_agent_updated", lambda *_: None), \
+         mock.patch("sys.stdout", out):
         rc = fn(*a)
     return rc, out.getvalue()
 
@@ -262,8 +266,8 @@ def test_cmd_update_does_not_claim_unconfirmed_version(monkeypatch):
     assert rc == 0
     assert "couldn't confirm" in out
     # the generic "a newer version is available — 0.3.0 → 0.9.0" line is fine; what
-    # must NOT appear is the CONFIRMED claim "upgraded ... → 0.9.0"
-    assert "upgraded" not in out
+    # must NOT appear is the CONFIRMED claim "upgraded <old> → <new>."
+    assert "upgraded 0.3.0 →" not in out
 
 
 # ── security: PyPI fetch hardening ────────────────────────────────────────────
