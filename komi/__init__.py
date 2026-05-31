@@ -4,7 +4,7 @@
 # build time via setuptools dynamic version ([tool.setuptools.dynamic] version =
 # {attr = "komi.__version__"}), so there is exactly one place to bump on a release
 # and the packaged metadata can never drift from this value by construction.
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 # When installed, prefer the distribution metadata — it's the ground truth of what
 # pip actually has on disk, which is what `komi-learn update` compares against
