@@ -362,7 +362,108 @@ def cmd_update(args) -> int:
         if updater.is_newer(latest, new):
             _p(f"  note: PyPI shows {latest} but the install reports {new} — "
                "you may be in a different environment than expected.")
-    _p("  If this release added hook events, refresh them with:  komi-learn install")
+
+    # The CLI upgrade above touched THIS interpreter. But the coding agent's behavior
+    # (recall/distill/compaction) is whatever the installed HOOKS import — a possibly
+    # different Python. Verify the new code actually reached the agent, not just the
+    # CLI, so "the behavior is updated" is a fact, not a hope.
+    _verify_agent_updated(new or latest)
+    return 0
+
+
+def _verify_agent_updated(expected: str) -> None:
+    """Confirm the agent's hook interpreter(s) now import the upgraded komi-learn.
+
+    The hooks run `python -m komi.adapters.claude_code....` with a pinned interpreter
+    (see setup._python_cmd). `pip install -U` only upgrades the env it ran in; if the
+    hooks point at a different Python, the CLI is new but the AGENT is still old. We
+    ask each hook interpreter what version it imports and report the truth."""
+    from komi import updater
+    try:
+        from komi.adapters.claude_code import setup
+        interps = setup.hook_interpreters()
+    except Exception:
+        return
+    if not interps:
+        _p("  (no Claude Code hooks installed yet — run  komi-learn install  to enable the agent.)")
+        return
+
+    import os as _os
+    stale = []   # (interp, version, same_as_cli)
+    for interp in interps:
+        ver = updater.installed_version_via_subprocess(interp)
+        same_as_cli = _os.path.normcase(interp) == _os.path.normcase(sys.executable)
+        if ver == expected:
+            who = "this interpreter" if same_as_cli else interp
+            _p(f"  ✓ agent behavior updated — hooks run {expected} (via {who}).")
+        else:
+            stale.append((interp, ver, same_as_cli))
+
+    # A stale entry on the SAME interpreter the CLI just upgraded isn't a
+    # "different Python" problem — the upgrade simply didn't land (a no-op, a pinned
+    # older constraint, or a permissions issue). Diagnose those two cases distinctly
+    # so the message isn't self-contradictory (telling the user their Python differs
+    # from itself, with a fix command identical to the one that just ran).
+    same = [(i, v) for i, v, s in stale if s]
+    other = [(i, v) for i, v, s in stale if not s]
+    if same:
+        for interp, ver in same:
+            _p(f"  ! the upgrade did not land in this interpreter — it still imports "
+               f"komi-learn {ver or 'nothing'}.")
+        _p("    Retry (possibly with elevated permissions), or check for a pinned "
+           "version constraint. The agent uses this same interpreter, so its behavior "
+           "is unchanged until the upgrade succeeds.")
+    if other:
+        _p("  ! the coding agent's hooks use a DIFFERENT Python than the one just "
+           "upgraded — the agent is still on the old code:")
+        for interp, ver in other:
+            _p(f"      {interp}  (imports komi-learn {ver or 'not installed'})")
+        for interp, _ in other:
+            _p(f"      fix:  \"{interp}\" -m pip install --upgrade {updater.DIST_NAME}")
+        _p("    Then the agent picks up the new behavior on its next hook firing.")
+
+
+def cmd_capture(args) -> int:
+    """Diagnostic: capture the raw payloads Claude Code sends to the SessionStart +
+    PostCompact hooks, to verify compaction re-injection works on this host.
+
+    `on` re-points those hooks at a recorder (recall still works); run /compact in a
+    real Claude Code session; `show` prints what fired; `off` restores normal hooks."""
+    from komi.adapters.claude_code import setup, hook_capture
+    action = getattr(args, "capture_action", None) or "show"
+
+    if action in ("on", "off"):
+        r = setup.set_capture(action == "on")
+        _p(f"  {_TICK[r.ok]} {r.detail}")
+        if r.ok and action == "on":
+            _p("\n  Now: open Claude Code, work a little, then run /compact.")
+            _p("  After that:  komi-learn capture show")
+            _p("  Restore normal hooks anytime:  komi-learn capture off")
+        return 0 if r.ok else 1
+
+    # show
+    p = hook_capture.capture_path()
+    if not p.exists():
+        _p("  no captures yet. Enable with `komi-learn capture on`, then /compact in Claude Code.")
+        return 0
+    try:
+        lines = [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except Exception as e:
+        _p(f"  could not read {p}: {e}")
+        return 1
+    if not lines:
+        _p("  capture file is empty.")
+        return 0
+    _p(f"  {len(lines)} captured hook event(s) from {p}:\n")
+    for ln in lines[-20:]:
+        try:
+            rec = json.loads(ln)
+        except Exception:
+            continue
+        _p(f"  • entry={rec.get('entry_event')}  hook_event_name={rec.get('hook_event_name')!r}  "
+           f"source={rec.get('source')!r}  trigger={rec.get('trigger')!r}")
+        _p(f"      keys={rec.get('parsed_keys')}  session_id={rec.get('session_id')!r}")
+    _p("\n  (entry = which komi entry point ran; hook_event_name/source/trigger = what the host sent)")
     return 0
 
 
@@ -544,6 +645,14 @@ def build_parser() -> argparse.ArgumentParser:
     pup.add_argument("--yes", "-y", action="store_true",
                      help="upgrade without the confirmation prompt")
     pup.set_defaults(func=cmd_update)
+
+    pcap = sub.add_parser("capture",
+                          help="diagnostic: record what Claude Code sends on /compact")
+    capsub = pcap.add_subparsers(dest="capture_action")
+    capsub.add_parser("on", help="re-point SessionStart+PostCompact hooks at the recorder")
+    capsub.add_parser("off", help="restore the normal hooks")
+    capsub.add_parser("show", help="print captured hook payloads (default)")
+    pcap.set_defaults(func=cmd_capture)
 
     pc = sub.add_parser("curate", help="consolidate the learning library now (normally ~weekly)")
     pc.add_argument("--dry-run", action="store_true", help="preview changes without applying")

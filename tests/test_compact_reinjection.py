@@ -27,8 +27,12 @@ def _run_main(payload: dict) -> str:
     """Drive hook_recall.main() with a given stdin payload + a stub recall block.
     Returns whatever it wrote to stdout."""
     out = io.StringIO()
-    with mock.patch.object(hr, "build_block", lambda cwd, p: _BLOCK), \
+    # Stub the breadcrumb/dedup helpers so routing tests don't touch the real
+    # state.json or cross-contaminate each other (each drives one event).
+    with mock.patch.object(hr, "build_block", lambda cwd, p, **k: _BLOCK), \
          mock.patch.object(hr, "_maybe_sync_pool", lambda: None), \
+         mock.patch.object(hr, "_compaction_already_served", lambda p, e: False), \
+         mock.patch.object(hr, "_record_compaction_served", lambda p, e: None), \
          mock.patch.object(hr, "_read_stdin_json", lambda: payload), \
          mock.patch("sys.stdout", out):
         rc = hr.main()
@@ -72,39 +76,73 @@ def test_legacy_payload_behaves_as_session_start():
     assert _BLOCK in obj["hookSpecificOutput"]["additionalContext"]
 
 
-def test_empty_block_emits_nothing_actionable():
+def test_empty_block_postcompact_emits_literally_nothing():
     out = io.StringIO()
-    with mock.patch.object(hr, "build_block", lambda cwd, p: ""), \
+    with mock.patch.object(hr, "build_block", lambda cwd, p, **k: ""), \
          mock.patch.object(hr, "_maybe_sync_pool", lambda: None), \
+         mock.patch.object(hr, "_compaction_already_served", lambda p, e: False), \
+         mock.patch.object(hr, "_record_compaction_served", lambda p, e: None), \
          mock.patch.object(hr, "_read_stdin_json",
                            lambda: {"hook_event_name": "PostCompact", "trigger": "auto"}), \
          mock.patch("sys.stdout", out):
         hr.main()
-    # nothing to inject → emit an empty JSON object, never a stray block
+    # PostCompact stdout is appended verbatim to context — a diagnostic "{}" would
+    # be noise, so emit literally nothing.
+    assert out.getvalue() == ""
+
+
+def test_empty_block_sessionstart_emits_empty_json():
+    out = io.StringIO()
+    with mock.patch.object(hr, "build_block", lambda cwd, p, **k: ""), \
+         mock.patch.object(hr, "_maybe_sync_pool", lambda: None), \
+         mock.patch.object(hr, "_read_stdin_json",
+                           lambda: {"hook_event_name": "SessionStart", "source": "startup"}), \
+         mock.patch("sys.stdout", out):
+        hr.main()
+    # SessionStart additionalContext is structured JSON → empty object is the no-op
     assert out.getvalue() == "{}"
 
 
 def test_recall_failure_never_breaks_session():
-    def boom(cwd, p):
+    """On SessionStart a recall failure emits a JSON no-op with a _note diagnostic."""
+    def boom(cwd, p, **k):
         raise RuntimeError("store exploded")
     out = io.StringIO()
     with mock.patch.object(hr, "build_block", boom), \
          mock.patch.object(hr, "_maybe_sync_pool", lambda: None), \
          mock.patch.object(hr, "_read_stdin_json",
-                           lambda: {"hook_event_name": "PostCompact"}), \
+                           lambda: {"hook_event_name": "SessionStart", "source": "startup"}), \
          mock.patch("sys.stdout", out):
         rc = hr.main()
     assert rc == 0                                   # graceful, non-fatal
     assert "_note" in json.loads(out.getvalue())     # records why it skipped
 
 
+def test_recall_failure_postcompact_emits_nothing():
+    """On PostCompact the same failure must emit literally nothing (no JSON diagnostic
+    polluting the verbatim-stdout context) and still be non-fatal."""
+    def boom(cwd, p, **k):
+        raise RuntimeError("store exploded")
+    out = io.StringIO()
+    with mock.patch.object(hr, "build_block", boom), \
+         mock.patch.object(hr, "_compaction_already_served", lambda p, e: False), \
+         mock.patch.object(hr, "_read_stdin_json",
+                           lambda: {"hook_event_name": "PostCompact"}), \
+         mock.patch("sys.stdout", out):
+        rc = hr.main()
+    assert rc == 0
+    assert out.getvalue() == ""
+
+
 def test_compaction_skips_background_maintenance():
     """A compaction re-inject must NOT kick off pool sync / curator (those belong to
     a genuine session start; firing them mid-session is wrong)."""
     called = {"sync": False, "curate": False}
-    with mock.patch.object(hr, "build_block", lambda cwd, p: _BLOCK), \
+    with mock.patch.object(hr, "build_block", lambda cwd, p, **k: _BLOCK), \
          mock.patch.object(hr, "_maybe_sync_pool",
                            lambda: called.__setitem__("sync", True)), \
+         mock.patch.object(hr, "_compaction_already_served", lambda p, e: False), \
+         mock.patch.object(hr, "_record_compaction_served", lambda p, e: None), \
          mock.patch.object(hr, "_read_stdin_json",
                            lambda: {"hook_event_name": "PostCompact", "trigger": "manual"}), \
          mock.patch("sys.stdout", io.StringIO()):
@@ -114,7 +152,7 @@ def test_compaction_skips_background_maintenance():
 
 def test_session_start_does_run_background_maintenance():
     called = {"sync": False}
-    with mock.patch.object(hr, "build_block", lambda cwd, p: _BLOCK), \
+    with mock.patch.object(hr, "build_block", lambda cwd, p, **k: _BLOCK), \
          mock.patch.object(hr, "_maybe_sync_pool",
                            lambda: called.__setitem__("sync", True)), \
          mock.patch.object(hr, "_read_stdin_json",

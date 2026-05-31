@@ -34,10 +34,10 @@ from ...engine.recall import recall, RecallConfig
 from . import paths
 
 
-def main() -> int:
+def main(default_event: str = "") -> int:
     payload = _read_stdin_json()
     cwd = payload.get("cwd", "") or ""
-    event, source = _classify_event(payload)
+    event, source = _classify_event(payload, default_event)
     is_compaction = (event == "PostCompact") or (event == "SessionStart" and source == "compact")
 
     # Background maintenance (pool sync ~12h, curator ~7d) belongs to a genuine
@@ -51,26 +51,51 @@ def main() -> int:
         except Exception:
             pass
 
+    # Double-injection guard: we register BOTH SessionStart(compact) and PostCompact
+    # for one compaction (a host-reliability hedge — see module docstring). On a host
+    # that honors both channels the block would otherwise be injected twice. If a
+    # sibling event already served THIS compaction moments ago, no-op.
+    if is_compaction and _compaction_already_served(payload, event):
+        _emit({}, note="komi recall: compaction already re-injected by a sibling event",
+              event=event)
+        return 0
+
     try:
         # Recompute the block FRESH every time — at compaction this picks up anything
-        # learned earlier this session. Cheap: a local store read.
-        block = build_block(cwd, payload)
+        # learned earlier this session. On a genuine session start we rebuild the
+        # index from Markdown (fresh=True); on a compaction we query the index that
+        # was already built at session start (fresh=False) — rebuilding mid-session
+        # would be a synchronous reindex + pool re-mirror in the hook's critical path.
+        block = build_block(cwd, payload, fresh=not is_compaction)
     except Exception as e:
         # Never break the session because recall failed — emit nothing.
-        _emit({}, note=f"komi recall skipped: {e}")
+        _emit({}, note=f"komi recall skipped: {e}", event=event)
         return 0
 
     if not block:
-        _emit({})
+        _emit({}, event=event)
         return 0
-
-    _emit_block(block, event, is_compaction)
+    # _emit_block is internally format-correct per event; the no-op/diagnostic emits
+    # above go through _emit, which is now event-aware + pipe-safe (suppresses the
+    # JSON diagnostic on PostCompact, where stdout is appended verbatim to context).
+    try:
+        _emit_block(block, event, is_compaction)
+        if is_compaction:
+            _record_compaction_served(payload, event)
+    except Exception:
+        pass    # a broken pipe / write error must never wedge the session
     return 0
 
 
-def build_block(cwd: str, payload: dict) -> str:
-    """Build the recall context block from the merged store. Reusable across events."""
-    store = _merged_store(cwd)
+def build_block(cwd: str, payload: dict, *, fresh: bool = True) -> str:
+    """Build the recall context block from the merged store. Reusable across events.
+
+    ``fresh`` rebuilds this store's index slice + re-mirrors the pool from disk (the
+    right thing at a genuine session start). When False (compaction), we skip that
+    rebuild and query the existing shared index — it was already populated at session
+    start, and a mid-session reindex is needless synchronous work in the hook path.
+    """
+    store = _merged_store(cwd, fresh=fresh)
     return recall(
         store,
         cwd=cwd,
@@ -80,14 +105,71 @@ def build_block(cwd: str, payload: dict) -> str:
     )
 
 
-def _classify_event(payload: dict) -> tuple[str, str]:
+def _classify_event(payload: dict, default_event: str = "") -> tuple[str, str]:
     """Return (event, source). ``event`` is the hook event name (SessionStart /
     PostCompact / …); ``source`` is the SessionStart trigger (startup/resume/clear/
-    compact) or the compaction trigger (manual/auto), empty if absent. Defaults to
+    compact) or the compaction trigger (manual/auto), empty if absent.
+
+    ``default_event`` is supplied by the invoking entry point (e.g. hook_compact
+    passes "PostCompact") and WINS over a missing/absent ``hook_event_name`` — the
+    entry point knows its own identity, so we never misroute a real PostCompact to
+    the SessionStart format just because the host omitted the field. Falls back to
     SessionStart so a bare/legacy payload behaves exactly as before."""
-    event = payload.get("hook_event_name") or "SessionStart"
+    event = payload.get("hook_event_name") or default_event or "SessionStart"
     source = payload.get("source") or payload.get("trigger") or ""
     return event, source
+
+
+# How close two events must be (seconds) to count as serving the SAME compaction.
+# SessionStart(compact) and PostCompact fire within moments of one /compact; a later
+# genuine compaction is many seconds away. Generous enough to dedup siblings, tight
+# enough not to swallow a real subsequent compaction.
+_COMPACTION_DEDUP_WINDOW = 45.0
+
+
+def _compaction_key(payload: dict) -> str:
+    """Identify a compaction event for dedup. Prefer the host's session id (both
+    sibling events share it); fall back to a constant so dedup still works per-window
+    when no id is present."""
+    return str(payload.get("session_id") or payload.get("sessionId") or "_nosid")
+
+
+def _compaction_already_served(payload: dict, event: str) -> bool:
+    """True if a sibling event already re-injected for THIS compaction (same session
+    id, within the dedup window) — so we don't inject the block twice. Read-only."""
+    import time
+    key = _compaction_key(payload)
+    try:
+        state = paths.read_state()       # read-only: no lock-and-rewrite
+    except Exception:
+        return False
+    last = state.get("last_compact_reinject") or {}
+    if last.get("key") != key:
+        return False
+    if last.get("event") == event:
+        return False  # the SAME event re-firing (e.g. retry) — let it re-inject
+    try:
+        return (time.time() - float(last.get("ts", 0))) < _COMPACTION_DEDUP_WINDOW
+    except Exception:
+        return False
+
+
+def _record_compaction_served(payload: dict, event: str) -> None:
+    """Breadcrumb: record that THIS event re-injected for THIS compaction. Doubles as
+    the dedup signal a sibling event reads, and as on-device observability (which path
+    actually fired in production)."""
+    import time
+    key = _compaction_key(payload)
+    now = time.time()
+
+    def _mut(s: dict):
+        s["last_compact_reinject"] = {"key": key, "event": event, "ts": now}
+        return None
+
+    try:
+        paths.update_state(_mut)
+    except Exception:
+        pass
 
 
 def _emit_block(block: str, event: str, is_compaction: bool) -> None:
@@ -124,16 +206,25 @@ def _emit_block(block: str, event: str, is_compaction: bool) -> None:
                                   "additionalContext": ctx}})
 
 
-def _merged_store(cwd: str) -> Store:
+def _merged_store(cwd: str, *, fresh: bool = True) -> Store:
     """Personal store is the base; if in a project, its learnings share the same
     index so a single recall query sees both. We open the personal store (which
     owns index.db) and ensure the project store + synced global pool are mirrored
-    into the shared index so one recall query sees personal + project + global."""
+    into the shared index so one recall query sees personal + project + global.
+
+    When ``fresh`` is False (a compaction re-inject), we SKIP the project reindex
+    and the pool re-mirror: the shared index was already built at session start, and
+    those operations are a full DELETE+re-INSERT (project Markdown) plus up to a
+    500-row pool mirror — too heavy to run synchronously in the hook's critical path
+    on every mid-session compaction. We just query what's already indexed.
+    """
     personal = Store(paths.personal_root(), index_path=paths.index_path())
+    if not fresh:
+        return personal
     proot = paths.project_root(cwd)
     if proot is not None:
         proj = Store(proot, index_path=paths.index_path())
-        # cheap: make sure project rows are present in the shared index
+        # make sure project rows are present in the shared index (session start only)
         proj.reindex()
     _mirror_pool_into_index(personal)
     return personal
@@ -226,19 +317,39 @@ def _recent_files(payload: dict) -> list[str]:
     return []
 
 
+_MAX_STDIN_BYTES = 4 * 1024 * 1024  # hook payloads are tiny; cap to avoid a runaway read
+
+
 def _read_stdin_json() -> dict:
     try:
-        data = sys.stdin.read()
+        data = sys.stdin.read(_MAX_STDIN_BYTES + 1)
+        if len(data) > _MAX_STDIN_BYTES:
+            return {}                     # oversized/garbage payload → safe no-op
         return json.loads(data) if data.strip() else {}
     except Exception:
         return {}
 
 
-def _emit(obj: dict, *, note: str = "") -> None:
+def _emit(obj: dict, *, note: str = "", event: str = "") -> None:
+    """Emit a no-op / diagnostic result. Event-aware and pipe-safe:
+
+    - For PostCompact, stdout is appended VERBATIM to the model's context (its
+      documented add-to-context path), so a diagnostic JSON blob like
+      ``{"_note": ...}`` would pollute the context. Emit nothing on PostCompact.
+    - For SessionStart, additionalContext comes from a structured JSON object, so a
+      bare ``{}`` (optionally with a ``_note``) is the correct no-op.
+    - A closed stdout (BrokenPipeError, host hung up early) must never wedge the
+      session — swallow any write error.
+    """
+    if event == "PostCompact":
+        return
     if note:
         obj = {**obj, "_note": note}
-    sys.stdout.write(json.dumps(obj))
-    sys.stdout.flush()
+    try:
+        sys.stdout.write(json.dumps(obj))
+        sys.stdout.flush()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

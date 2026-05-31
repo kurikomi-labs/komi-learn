@@ -219,12 +219,18 @@ def plan_upgrade() -> UpgradePlan:
 
 # ── upgrade execution + re-verify ────────────────────────────────────────────
 
-def installed_version_via_subprocess() -> Optional[str]:
-    """Read komi-learn's version in a *fresh* interpreter.
+def installed_version_via_subprocess(python: Optional[str] = None) -> Optional[str]:
+    """Read komi-learn's installed version using a *fresh* interpreter.
 
     importlib.metadata caches distribution info for the life of a process, so after
     an in-process pip upgrade the running interpreter still reports the OLD version.
     Shelling out to a clean python gets the truth post-upgrade.
+
+    ``python`` selects which interpreter to ask (defaults to the one running us). We
+    use this to check the version visible to the AGENT's hook interpreter, which may
+    differ from the CLI's — see ``komi.adapters.claude_code.setup.hook_interpreters``.
+    Returns None if that interpreter can't import komi-learn at all (e.g. the upgrade
+    landed in a different environment).
     """
     # Pass the dist name as argv (sys.argv[1]) rather than interpolating it into
     # the code string — keeps the snippet free of string-building even though
@@ -238,7 +244,7 @@ def installed_version_via_subprocess() -> Optional[str]:
         "    pass\n"
     )
     try:
-        r = subprocess.run([sys.executable, "-c", code, DIST_NAME],
+        r = subprocess.run([python or sys.executable, "-c", code, DIST_NAME],
                            capture_output=True, text=True, timeout=30)
         out = (r.stdout or "").strip()
         return out or None

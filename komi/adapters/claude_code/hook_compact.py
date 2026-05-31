@@ -14,4 +14,8 @@ from __future__ import annotations
 from .hook_recall import main
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # This entry point IS the PostCompact hook — assert that identity rather than
+    # re-deriving it from stdin. If the host omits ``hook_event_name`` on the
+    # PostCompact payload, main() would otherwise default to SessionStart and emit
+    # the wrong format on the very path this hook exists to serve.
+    raise SystemExit(main(default_event="PostCompact"))

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -39,6 +40,63 @@ _HOOK_MODULES = {
     "PostCompact": "komi.adapters.claude_code.hook_compact",
 }
 _HOOK_MARKER = "komi.adapters.claude_code"
+# Match a komi hook by COMMAND SHAPE — `... -m komi.adapters.claude_code.<module>` —
+# not a bare substring. A loose `"komi.adapters.claude_code" in command` test
+# false-positives on an unrelated user hook that merely mentions the module path
+# (e.g. `python wrapper.py --note "see komi.adapters.claude_code"`), and would then
+# silently overwrite (self-heal) or remove (uninstall) that user hook. The regex
+# requires the module to be an actual `-m` target.
+_HOOK_CMD_RE = re.compile(r"(?:^|\s)-m\s+komi\.adapters\.claude_code\.\w+(?:\s|$)")
+
+
+def _is_komi_command(command: str) -> bool:
+    return bool(_HOOK_CMD_RE.search(command or ""))
+
+
+def _interpreter_from_command(command: str) -> Optional[str]:
+    """Extract the interpreter (the leading token) from a hook command line.
+
+    Commands look like ``"C:\\Program Files\\Python\\python.exe" -m komi...`` or
+    ``/usr/bin/python3 -m komi...``. The exe may be double-quoted (it is when the
+    path contains spaces — see _python_cmd). We can't use shlex (it mangles Windows
+    backslashes in posix mode), so parse the first token directly: a quoted span, or
+    everything up to the first space."""
+    s = (command or "").strip()
+    if not s:
+        return None
+    if s[0] == '"':
+        end = s.find('"', 1)
+        return s[1:end] if end != -1 else None
+    return s.split(" ", 1)[0]
+
+
+def hook_interpreters() -> list:
+    """The distinct Python interpreters the installed komi hooks actually run under.
+
+    `komi-learn update` upgrades the package for the interpreter running the CLI;
+    the AGENT's behavior, though, is whatever these hook interpreters import. They're
+    normally the same, but can diverge (CLI in one venv, hooks pinned to another). We
+    surface them so update can VERIFY the new code reached the agent, not just the CLI.
+    Returns [] if there's no settings.json or no komi hooks.
+    """
+    sp = settings_path()
+    out = []
+    try:
+        if not sp.exists():
+            return []
+        data = json.loads(sp.read_text(encoding="utf-8"))
+        hooks = data.get("hooks", {})
+        for event in hooks.values():
+            for entry in event:
+                for h in entry.get("hooks", []):
+                    cmd = h.get("command", "")
+                    if _is_komi_command(cmd):
+                        interp = _interpreter_from_command(cmd)
+                        if interp and interp not in out:
+                            out.append(interp)
+    except Exception:
+        return out
+    return out
 
 
 @dataclass
@@ -181,15 +239,16 @@ def _install_hooks() -> StepResult:
                 return StepResult("hooks", False, "settings.json is not a JSON object",
                                   fix="Fix settings.json to be a JSON object, then re-run.")
         hooks = data.setdefault("hooks", {})
-        added, refreshed = [], []
+        added, refreshed, kept_capture = [], [], []
         for event in HOOK_EVENTS:
             arr = hooks.setdefault(event, [])
             want = _hook_command(_HOOK_MODULES[event])
-            # find an existing komi hook for this event
+            # find an existing komi hook for this event (match by command shape,
+            # never a loose substring — see _is_komi_command)
             existing = None
             for entry in arr:
                 for h in entry.get("hooks", []):
-                    if _HOOK_MARKER in h.get("command", ""):
+                    if _is_komi_command(h.get("command", "")):
                         existing = h
                         break
                 if existing:
@@ -197,6 +256,11 @@ def _install_hooks() -> StepResult:
             if existing is None:
                 arr.append({"hooks": [{"type": "command", "command": want}]})
                 added.append(event)
+            elif "hook_capture" in (existing.get("command") or ""):
+                # Diagnostic capture is ON for this event. Do NOT silently overwrite
+                # it with the normal hook — that would disable the recorder mid-test,
+                # reported as a benign "refreshed". Leave it; tell the user.
+                kept_capture.append(event)
             elif existing.get("command") != want:
                 # self-heal: a stale command (e.g. bare 'python', or an old repo
                 # path) gets upgraded to the canonical absolute-interpreter form.
@@ -211,6 +275,9 @@ def _install_hooks() -> StepResult:
             bits.append(f"added: {', '.join(added)}")
         if refreshed:
             bits.append(f"refreshed: {', '.join(refreshed)}")
+        if kept_capture:
+            bits.append(f"capture left ON for {', '.join(kept_capture)} "
+                        "(run `komi-learn capture off` to restore normal hooks)")
         detail += f" ({'; '.join(bits)})" if bits else " (already current)"
         return StepResult("hooks", True, detail)
     except Exception as e:
@@ -321,7 +388,7 @@ def uninstall(*, keep_data: bool = True) -> InstallReport:
                 kept = []
                 for entry in hooks[event]:
                     entry_hooks = [h for h in entry.get("hooks", [])
-                                   if _HOOK_MARKER not in h.get("command", "")]
+                                   if not _is_komi_command(h.get("command", ""))]
                     if entry_hooks:
                         kept.append({**entry, "hooks": entry_hooks})
                     elif entry.get("hooks"):
@@ -353,5 +420,79 @@ def uninstall(*, keep_data: bool = True) -> InstallReport:
     return rep
 
 
+# ── diagnostic capture toggle ──────────────────────────────────────────────
+
+# When capture is ON, the SessionStart + PostCompact hooks point at hook_capture
+# (which records the raw payload, then delegates to the normal recall). This lets us
+# observe what Claude Code actually sends on a /compact. Distill hooks are untouched.
+_CAPTURE_COMMANDS = {
+    "SessionStart": "komi.adapters.claude_code.hook_capture",
+    "PostCompact": "komi.adapters.claude_code.hook_capture --compact",
+}
+_NORMAL_COMMANDS = {
+    "SessionStart": _HOOK_MODULES["SessionStart"],
+    "PostCompact": _HOOK_MODULES["PostCompact"],
+}
+
+
+def _hook_command_raw(module_or_cmd: str) -> str:
+    """Build a hook command line; ``module_or_cmd`` may include trailing args."""
+    parts = module_or_cmd.split(" ", 1)
+    mod, extra = parts[0], (parts[1] if len(parts) > 1 else "")
+    cmd = f"{_python_cmd()} -m {mod}"
+    return f"{cmd} {extra}".strip() if extra else cmd
+
+
+def set_capture(enabled: bool) -> StepResult:
+    """Re-point (or restore) the SessionStart + PostCompact hooks for diagnostics.
+    Idempotent; only touches komi's own hook entries."""
+    sp = settings_path()
+    try:
+        if not sp.exists():
+            return StepResult("capture", False, "no settings.json — run komi-learn install first")
+        data = json.loads(sp.read_text(encoding="utf-8"))
+        hooks = data.setdefault("hooks", {})
+        target = _CAPTURE_COMMANDS if enabled else _NORMAL_COMMANDS
+
+        # Only ever RE-POINT komi's existing hooks; never create them. If komi isn't
+        # installed (no komi hook in any target event), refuse — otherwise `capture
+        # on/off` after `uninstall` (which strips komi entries but leaves the file)
+        # would silently re-install the hooks the user just removed.
+        def _has_komi(event):
+            return any(_is_komi_command(h.get("command", ""))
+                       for entry in hooks.get(event, []) for h in entry.get("hooks", []))
+        if not any(_has_komi(ev) for ev in target):
+            return StepResult("capture", False,
+                              "komi-learn isn't installed (no hooks found) — run komi-learn install first")
+
+        changed = []
+        for event, mod in target.items():
+            want = _hook_command_raw(mod)
+            arr = hooks.setdefault(event, [])
+            for entry in arr:
+                done = False
+                for h in entry.get("hooks", []):
+                    if _is_komi_command(h.get("command", "")):
+                        if h.get("command") != want:
+                            h["command"] = want
+                            changed.append(event)
+                        done = True
+                        break
+                if done:
+                    break
+            # If this particular event has no komi hook, SKIP it — do not append.
+            # (set_capture re-points; install is what creates hooks.)
+        if not _atomic_write_json(sp, data):
+            return StepResult("capture", False, "failed to write settings.json")
+        state = "ON" if enabled else "OFF"
+        return StepResult("capture", True,
+                          f"capture {state}" + (f" (updated: {', '.join(sorted(set(changed)))})"
+                                                if changed else " (already set)"))
+    except json.JSONDecodeError as e:
+        return StepResult("capture", False, f"settings.json invalid JSON: {e}")
+    except Exception as e:
+        return StepResult("capture", False, str(e))
+
+
 __all__ = ["install", "uninstall", "InstallReport", "StepResult", "settings_path",
-           "HOOK_EVENTS"]
+           "HOOK_EVENTS", "set_capture", "hook_interpreters"]
