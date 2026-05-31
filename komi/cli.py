@@ -349,11 +349,19 @@ def cmd_update(args) -> int:
         return 1
 
     # importlib.metadata is cached in this process; read the truth from a fresh one.
-    new = updater.installed_version_via_subprocess() or latest
-    _p(f"\n{PRODUCT}: upgraded {current} → {new}.")
-    if updater.is_newer(latest, new):
-        _p(f"  note: PyPI shows {latest} but the install reports {new} — "
-           "you may be in a different environment than expected.")
+    # Only claim a confirmed version when we actually read one — a non-zero pip
+    # exit isn't proof komi-learn reached `latest` (pip can no-op or install a
+    # pinned older version), so never substitute `latest` and call it confirmed.
+    new = updater.installed_version_via_subprocess()
+    if new is None:
+        _p(f"\n{PRODUCT}: upgrade command finished, but I couldn't confirm the "
+           "installed version.")
+        _p("  Check it with:  komi-learn update --check")
+    else:
+        _p(f"\n{PRODUCT}: upgraded {current} → {new}.")
+        if updater.is_newer(latest, new):
+            _p(f"  note: PyPI shows {latest} but the install reports {new} — "
+               "you may be in a different environment than expected.")
     _p("  If this release added hook events, refresh them with:  komi-learn install")
     return 0
 

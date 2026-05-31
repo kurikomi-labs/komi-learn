@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "komi-learn"
-version = "0.3.0"
+# Version is read from komi/__init__.py (__version__) — the single source of
+# truth. Bump it there; see [tool.setuptools.dynamic] below.
+dynamic = ["version"]
 description = "A continuous, zero-friction learning layer for AI agents — learns about you and improves its own skills across every session, with an anonymized, provenance-verified global knowledge pool."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -51,6 +53,11 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 komi-learn = "komi.cli:main"
+
+[tool.setuptools.dynamic]
+# Read the version from the package's __version__ at build time (single source
+# of truth in komi/__init__.py).
+version = { attr = "komi.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["komi*"]
