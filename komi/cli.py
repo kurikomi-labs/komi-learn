@@ -299,6 +299,73 @@ def cmd_login(args) -> int:
     return rc
 
 
+def cmd_update(args) -> int:
+    """Self-update: check PyPI for a newer komi-learn and upgrade in place.
+
+    Upgrades *this* interpreter's install (the one the hooks import), via pip or
+    pipx depending on how komi-learn was installed. Use --check to only report
+    whether an update is available. After upgrading, re-run `komi-learn install`
+    is NOT required for code — but if a release adds new hook events, run it to
+    refresh your settings."""
+    import komi
+    from komi import updater
+    from komi import cli_prompt as PR
+
+    current = getattr(komi, "__version__", "?")
+    _p(f"{PRODUCT}: installed {current}. Checking PyPI…")
+    latest = updater.check_latest()
+    if latest is None:
+        _p(f"{PRODUCT}: couldn't reach PyPI (offline?). Try again later, or upgrade manually:")
+        _p(f"      {updater.plan_upgrade().display()}")
+        return 1
+    if not updater.is_newer(latest, current):
+        _p(f"{PRODUCT}: you're on the latest version ({current}). Nothing to do.")
+        return 0
+
+    _p(f"{PRODUCT}: a newer version is available — {current} → {latest}.")
+    plan = updater.plan_upgrade()
+
+    if getattr(args, "check", False):
+        _p(f"  to upgrade:  {plan.display()}")
+        return 0
+
+    if not plan.runnable:
+        # Couldn't identify a safe package manager — never guess, just instruct.
+        _p(f"  couldn't auto-detect how {PRODUCT} was installed. Upgrade with:")
+        _p(f"      {plan.display()}")
+        return 1
+
+    if not getattr(args, "yes", False):
+        if not PR.ask_yes_no(f"  Upgrade now via {plan.manager}?", default=True,
+                             summary=f"Runs: {plan.display()}"):
+            _p(f"  skipped. Upgrade anytime with:  {plan.display()}")
+            return 0
+
+    _p(f"\n  upgrading via {plan.manager}…\n")
+    ok, detail = updater.run_upgrade(plan)
+    if not ok:
+        _p(f"\n{PRODUCT}: upgrade failed ({detail}). You can run it manually:")
+        _p(f"      {plan.display()}")
+        return 1
+
+    # importlib.metadata is cached in this process; read the truth from a fresh one.
+    # Only claim a confirmed version when we actually read one — a non-zero pip
+    # exit isn't proof komi-learn reached `latest` (pip can no-op or install a
+    # pinned older version), so never substitute `latest` and call it confirmed.
+    new = updater.installed_version_via_subprocess()
+    if new is None:
+        _p(f"\n{PRODUCT}: upgrade command finished, but I couldn't confirm the "
+           "installed version.")
+        _p("  Check it with:  komi-learn update --check")
+    else:
+        _p(f"\n{PRODUCT}: upgraded {current} → {new}.")
+        if updater.is_newer(latest, new):
+            _p(f"  note: PyPI shows {latest} but the install reports {new} — "
+               "you may be in a different environment than expected.")
+    _p("  If this release added hook events, refresh them with:  komi-learn install")
+    return 0
+
+
 def cmd_queue(args) -> int:
     """Inspect + act on the global-contribution review queue (the human gate).
 
@@ -470,6 +537,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     pl = sub.add_parser("login", help="log in for free OAuth distillation (claude CLI)")
     pl.set_defaults(func=cmd_login)
+
+    pup = sub.add_parser("update", help="check PyPI and upgrade komi-learn to the latest version")
+    pup.add_argument("--check", action="store_true",
+                     help="only report whether an update is available; don't upgrade")
+    pup.add_argument("--yes", "-y", action="store_true",
+                     help="upgrade without the confirmation prompt")
+    pup.set_defaults(func=cmd_update)
 
     pc = sub.add_parser("curate", help="consolidate the learning library now (normally ~weekly)")
     pc.add_argument("--dry-run", action="store_true", help="preview changes without applying")
