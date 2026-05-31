@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -39,6 +40,17 @@ _HOOK_MODULES = {
     "PostCompact": "komi.adapters.claude_code.hook_compact",
 }
 _HOOK_MARKER = "komi.adapters.claude_code"
+# Match a komi hook by COMMAND SHAPE — `... -m komi.adapters.claude_code.<module>` —
+# not a bare substring. A loose `"komi.adapters.claude_code" in command` test
+# false-positives on an unrelated user hook that merely mentions the module path
+# (e.g. `python wrapper.py --note "see komi.adapters.claude_code"`), and would then
+# silently overwrite (self-heal) or remove (uninstall) that user hook. The regex
+# requires the module to be an actual `-m` target.
+_HOOK_CMD_RE = re.compile(r"(?:^|\s)-m\s+komi\.adapters\.claude_code\.\w+(?:\s|$)")
+
+
+def _is_komi_command(command: str) -> bool:
+    return bool(_HOOK_CMD_RE.search(command or ""))
 
 
 @dataclass
@@ -185,11 +197,12 @@ def _install_hooks() -> StepResult:
         for event in HOOK_EVENTS:
             arr = hooks.setdefault(event, [])
             want = _hook_command(_HOOK_MODULES[event])
-            # find an existing komi hook for this event
+            # find an existing komi hook for this event (match by command shape,
+            # never a loose substring — see _is_komi_command)
             existing = None
             for entry in arr:
                 for h in entry.get("hooks", []):
-                    if _HOOK_MARKER in h.get("command", ""):
+                    if _is_komi_command(h.get("command", "")):
                         existing = h
                         break
                 if existing:
@@ -321,7 +334,7 @@ def uninstall(*, keep_data: bool = True) -> InstallReport:
                 kept = []
                 for entry in hooks[event]:
                     entry_hooks = [h for h in entry.get("hooks", [])
-                                   if _HOOK_MARKER not in h.get("command", "")]
+                                   if not _is_komi_command(h.get("command", ""))]
                     if entry_hooks:
                         kept.append({**entry, "hooks": entry_hooks})
                     elif entry.get("hooks"):
@@ -353,5 +366,68 @@ def uninstall(*, keep_data: bool = True) -> InstallReport:
     return rep
 
 
+# ── diagnostic capture toggle ──────────────────────────────────────────────
+
+# When capture is ON, the SessionStart + PostCompact hooks point at hook_capture
+# (which records the raw payload, then delegates to the normal recall). This lets us
+# observe what Claude Code actually sends on a /compact. Distill hooks are untouched.
+_CAPTURE_COMMANDS = {
+    "SessionStart": "komi.adapters.claude_code.hook_capture",
+    "PostCompact": "komi.adapters.claude_code.hook_capture --compact",
+}
+_NORMAL_COMMANDS = {
+    "SessionStart": _HOOK_MODULES["SessionStart"],
+    "PostCompact": _HOOK_MODULES["PostCompact"],
+}
+
+
+def _hook_command_raw(module_or_cmd: str) -> str:
+    """Build a hook command line; ``module_or_cmd`` may include trailing args."""
+    parts = module_or_cmd.split(" ", 1)
+    mod, extra = parts[0], (parts[1] if len(parts) > 1 else "")
+    cmd = f"{_python_cmd()} -m {mod}"
+    return f"{cmd} {extra}".strip() if extra else cmd
+
+
+def set_capture(enabled: bool) -> StepResult:
+    """Re-point (or restore) the SessionStart + PostCompact hooks for diagnostics.
+    Idempotent; only touches komi's own hook entries."""
+    sp = settings_path()
+    try:
+        if not sp.exists():
+            return StepResult("capture", False, "no settings.json — run komi-learn install first")
+        data = json.loads(sp.read_text(encoding="utf-8"))
+        hooks = data.setdefault("hooks", {})
+        target = _CAPTURE_COMMANDS if enabled else _NORMAL_COMMANDS
+        changed = []
+        for event, mod in target.items():
+            want = _hook_command_raw(mod)
+            arr = hooks.setdefault(event, [])
+            found = False
+            for entry in arr:
+                for h in entry.get("hooks", []):
+                    if _is_komi_command(h.get("command", "")):
+                        if h.get("command") != want:
+                            h["command"] = want
+                            changed.append(event)
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                arr.append({"hooks": [{"type": "command", "command": want}]})
+                changed.append(event)
+        if not _atomic_write_json(sp, data):
+            return StepResult("capture", False, "failed to write settings.json")
+        state = "ON" if enabled else "OFF"
+        return StepResult("capture", True,
+                          f"capture {state}" + (f" (updated: {', '.join(sorted(set(changed)))})"
+                                                if changed else " (already set)"))
+    except json.JSONDecodeError as e:
+        return StepResult("capture", False, f"settings.json invalid JSON: {e}")
+    except Exception as e:
+        return StepResult("capture", False, str(e))
+
+
 __all__ = ["install", "uninstall", "InstallReport", "StepResult", "settings_path",
-           "HOOK_EVENTS"]
+           "HOOK_EVENTS", "set_capture"]

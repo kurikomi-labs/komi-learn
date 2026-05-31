@@ -366,6 +366,50 @@ def cmd_update(args) -> int:
     return 0
 
 
+def cmd_capture(args) -> int:
+    """Diagnostic: capture the raw payloads Claude Code sends to the SessionStart +
+    PostCompact hooks, to verify compaction re-injection works on this host.
+
+    `on` re-points those hooks at a recorder (recall still works); run /compact in a
+    real Claude Code session; `show` prints what fired; `off` restores normal hooks."""
+    from komi.adapters.claude_code import setup, hook_capture
+    action = getattr(args, "capture_action", None) or "show"
+
+    if action in ("on", "off"):
+        r = setup.set_capture(action == "on")
+        _p(f"  {_TICK[r.ok]} {r.detail}")
+        if r.ok and action == "on":
+            _p("\n  Now: open Claude Code, work a little, then run /compact.")
+            _p("  After that:  komi-learn capture show")
+            _p("  Restore normal hooks anytime:  komi-learn capture off")
+        return 0 if r.ok else 1
+
+    # show
+    p = hook_capture.capture_path()
+    if not p.exists():
+        _p("  no captures yet. Enable with `komi-learn capture on`, then /compact in Claude Code.")
+        return 0
+    try:
+        lines = [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except Exception as e:
+        _p(f"  could not read {p}: {e}")
+        return 1
+    if not lines:
+        _p("  capture file is empty.")
+        return 0
+    _p(f"  {len(lines)} captured hook event(s) from {p}:\n")
+    for ln in lines[-20:]:
+        try:
+            rec = json.loads(ln)
+        except Exception:
+            continue
+        _p(f"  • entry={rec.get('entry_event')}  hook_event_name={rec.get('hook_event_name')!r}  "
+           f"source={rec.get('source')!r}  trigger={rec.get('trigger')!r}")
+        _p(f"      keys={rec.get('parsed_keys')}  session_id={rec.get('session_id')!r}")
+    _p("\n  (entry = which komi entry point ran; hook_event_name/source/trigger = what the host sent)")
+    return 0
+
+
 def cmd_queue(args) -> int:
     """Inspect + act on the global-contribution review queue (the human gate).
 
@@ -544,6 +588,14 @@ def build_parser() -> argparse.ArgumentParser:
     pup.add_argument("--yes", "-y", action="store_true",
                      help="upgrade without the confirmation prompt")
     pup.set_defaults(func=cmd_update)
+
+    pcap = sub.add_parser("capture",
+                          help="diagnostic: record what Claude Code sends on /compact")
+    capsub = pcap.add_subparsers(dest="capture_action")
+    capsub.add_parser("on", help="re-point SessionStart+PostCompact hooks at the recorder")
+    capsub.add_parser("off", help="restore the normal hooks")
+    capsub.add_parser("show", help="print captured hook payloads (default)")
+    pcap.set_defaults(func=cmd_capture)
 
     pc = sub.add_parser("curate", help="consolidate the learning library now (normally ~weekly)")
     pc.add_argument("--dry-run", action="store_true", help="preview changes without applying")

@@ -27,8 +27,12 @@ def _run_main(payload: dict) -> str:
     """Drive hook_recall.main() with a given stdin payload + a stub recall block.
     Returns whatever it wrote to stdout."""
     out = io.StringIO()
-    with mock.patch.object(hr, "build_block", lambda cwd, p: _BLOCK), \
+    # Stub the breadcrumb/dedup helpers so routing tests don't touch the real
+    # state.json or cross-contaminate each other (each drives one event).
+    with mock.patch.object(hr, "build_block", lambda cwd, p, **k: _BLOCK), \
          mock.patch.object(hr, "_maybe_sync_pool", lambda: None), \
+         mock.patch.object(hr, "_compaction_already_served", lambda p, e: False), \
+         mock.patch.object(hr, "_record_compaction_served", lambda p, e: None), \
          mock.patch.object(hr, "_read_stdin_json", lambda: payload), \
          mock.patch("sys.stdout", out):
         rc = hr.main()
@@ -74,7 +78,7 @@ def test_legacy_payload_behaves_as_session_start():
 
 def test_empty_block_emits_nothing_actionable():
     out = io.StringIO()
-    with mock.patch.object(hr, "build_block", lambda cwd, p: ""), \
+    with mock.patch.object(hr, "build_block", lambda cwd, p, **k: ""), \
          mock.patch.object(hr, "_maybe_sync_pool", lambda: None), \
          mock.patch.object(hr, "_read_stdin_json",
                            lambda: {"hook_event_name": "PostCompact", "trigger": "auto"}), \
@@ -85,7 +89,7 @@ def test_empty_block_emits_nothing_actionable():
 
 
 def test_recall_failure_never_breaks_session():
-    def boom(cwd, p):
+    def boom(cwd, p, **k):
         raise RuntimeError("store exploded")
     out = io.StringIO()
     with mock.patch.object(hr, "build_block", boom), \
@@ -102,9 +106,11 @@ def test_compaction_skips_background_maintenance():
     """A compaction re-inject must NOT kick off pool sync / curator (those belong to
     a genuine session start; firing them mid-session is wrong)."""
     called = {"sync": False, "curate": False}
-    with mock.patch.object(hr, "build_block", lambda cwd, p: _BLOCK), \
+    with mock.patch.object(hr, "build_block", lambda cwd, p, **k: _BLOCK), \
          mock.patch.object(hr, "_maybe_sync_pool",
                            lambda: called.__setitem__("sync", True)), \
+         mock.patch.object(hr, "_compaction_already_served", lambda p, e: False), \
+         mock.patch.object(hr, "_record_compaction_served", lambda p, e: None), \
          mock.patch.object(hr, "_read_stdin_json",
                            lambda: {"hook_event_name": "PostCompact", "trigger": "manual"}), \
          mock.patch("sys.stdout", io.StringIO()):
@@ -114,7 +120,7 @@ def test_compaction_skips_background_maintenance():
 
 def test_session_start_does_run_background_maintenance():
     called = {"sync": False}
-    with mock.patch.object(hr, "build_block", lambda cwd, p: _BLOCK), \
+    with mock.patch.object(hr, "build_block", lambda cwd, p, **k: _BLOCK), \
          mock.patch.object(hr, "_maybe_sync_pool",
                            lambda: called.__setitem__("sync", True)), \
          mock.patch.object(hr, "_read_stdin_json",
