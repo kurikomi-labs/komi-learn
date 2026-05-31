@@ -34,6 +34,7 @@ pip install -e .
 
 ```bash
 komi-learn doctor      # check the install and what to fix
+komi-learn update      # upgrade to the latest version (--check to only look)
 komi-learn status      # config + how much it has learned
 komi-learn config      # change any setting (menu, or `config set <key> <val>`)
 komi-learn sync        # pull the latest community learnings
