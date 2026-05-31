@@ -29,6 +29,16 @@
           }
         ]
       }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m komi.adapters.claude_code.hook_compact"
+          }
+        ]
+      }
     ]
   }
 }

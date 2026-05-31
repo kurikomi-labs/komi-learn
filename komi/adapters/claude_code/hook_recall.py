@@ -1,12 +1,27 @@
-"""SessionStart hook — inject recalled learnings as additionalContext.
+"""Recall hook — inject recalled learnings into the agent's context.
 
-Claude Code invokes this with the SessionStart hook JSON on stdin. We build the
-recall block from the personal + project stores and emit it via
-``hookSpecificOutput.additionalContext`` so it lands in the model's context with
-zero user action. Runs once at session start to keep the prompt prefix stable
-(the frozen-snapshot discipline that preserves the host's prompt cache).
+Claude Code invokes this with a hook JSON on stdin. We build the recall block from
+the personal + project stores and emit it so it lands in the model's context with
+zero user action. It serves THREE events:
 
-Entry point: ``python -m komi.adapters.claude_code.hook_recall``
+  • SessionStart (source = startup | resume | clear) — the primary path; emits
+    ``hookSpecificOutput.additionalContext``. Runs once at session start to keep the
+    prompt prefix stable (the frozen-snapshot discipline that preserves the cache).
+
+  • SessionStart (source = compact) AND PostCompact — re-inject after a /compact (or
+    auto-compact), because compaction can drop the originally-injected learnings and
+    the agent would otherwise stop applying them mid-session. Research caveat: on
+    current Claude Code, SessionStart(compact) additionalContext is known to be
+    dropped (issue #15174) and PostCompact context-injection is under-documented — so
+    we register on BOTH and additionally print the block as plain stdout (the
+    documented "stdout is added to context" mechanism), to maximize the chance the
+    re-injection actually lands on whatever the host version honors. Best-effort by
+    design; if none inject, it degrades to a harmless no-op (the learnings are still
+    on disk and reload fully next session).
+
+Entry points:
+  ``python -m komi.adapters.claude_code.hook_recall``   (SessionStart)
+  ``python -m komi.adapters.claude_code.hook_compact``  (PostCompact; thin shim → main)
 """
 
 from __future__ import annotations
@@ -22,25 +37,24 @@ from . import paths
 def main() -> int:
     payload = _read_stdin_json()
     cwd = payload.get("cwd", "") or ""
+    event, source = _classify_event(payload)
+    is_compaction = (event == "PostCompact") or (event == "SessionStart" and source == "compact")
 
-    # Kick off background maintenance if due (detached; never blocks this hook):
-    # pool sync (~12h cadence) and the slow curator (~7d cadence).
-    _maybe_sync_pool()
-    try:
-        from .curate import maybe_curate_in_background
-        maybe_curate_in_background()
-    except Exception:
-        pass
+    # Background maintenance (pool sync ~12h, curator ~7d) belongs to a genuine
+    # session START only — NOT to a compaction re-inject (which happens mid-session
+    # and shouldn't kick off cadenced jobs or disturb the running session).
+    if not is_compaction:
+        _maybe_sync_pool()
+        try:
+            from .curate import maybe_curate_in_background
+            maybe_curate_in_background()
+        except Exception:
+            pass
 
     try:
-        store = _merged_store(cwd)
-        block = recall(
-            store,
-            cwd=cwd,
-            recent_files=_recent_files(payload),
-            prompt_hint="",
-            config=RecallConfig(k=8, include_global=True),
-        )
+        # Recompute the block FRESH every time — at compaction this picks up anything
+        # learned earlier this session. Cheap: a local store read.
+        block = build_block(cwd, payload)
     except Exception as e:
         # Never break the session because recall failed — emit nothing.
         _emit({}, note=f"komi recall skipped: {e}")
@@ -50,13 +64,64 @@ def main() -> int:
         _emit({})
         return 0
 
-    _emit({
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": block,
-        }
-    })
+    _emit_block(block, event, is_compaction)
     return 0
+
+
+def build_block(cwd: str, payload: dict) -> str:
+    """Build the recall context block from the merged store. Reusable across events."""
+    store = _merged_store(cwd)
+    return recall(
+        store,
+        cwd=cwd,
+        recent_files=_recent_files(payload),
+        prompt_hint="",
+        config=RecallConfig(k=8, include_global=True),
+    )
+
+
+def _classify_event(payload: dict) -> tuple[str, str]:
+    """Return (event, source). ``event`` is the hook event name (SessionStart /
+    PostCompact / …); ``source`` is the SessionStart trigger (startup/resume/clear/
+    compact) or the compaction trigger (manual/auto), empty if absent. Defaults to
+    SessionStart so a bare/legacy payload behaves exactly as before."""
+    event = payload.get("hook_event_name") or "SessionStart"
+    source = payload.get("source") or payload.get("trigger") or ""
+    return event, source
+
+
+def _emit_block(block: str, event: str, is_compaction: bool) -> None:
+    """Emit the recall block in the form the given event supports.
+
+    The two injection mechanisms are mutually exclusive on one stdout stream (a
+    JSON object plus trailing plain text is neither valid JSON nor clean text), so
+    we choose by EVENT:
+
+      • SessionStart (incl. source=compact): structured
+        ``hookSpecificOutput.additionalContext`` — the documented SessionStart path.
+      • PostCompact: plain stdout text — the documented "stdout is added to context"
+        path for PostCompact (its JSON additionalContext support is unconfirmed).
+
+    Registering komi on BOTH SessionStart(compact) and PostCompact is the
+    belt-and-suspenders part (see module docstring): each speaks its own correct
+    format, so whichever event the host version actually honors, the learnings land.
+    At compaction we frame the block so the model knows it's a re-application."""
+    if event == "PostCompact":
+        framed = (
+            "Recalled learnings (re-applied after this conversation was compacted — "
+            "keep using them):\n" + block
+        )
+        sys.stdout.write(framed)        # plain stdout: PostCompact's add-to-context path
+        sys.stdout.flush()
+        return
+
+    # SessionStart (startup/resume/clear/compact): structured additionalContext.
+    ctx = block
+    if is_compaction:
+        ctx = ("Recalled learnings (re-applied after this conversation was "
+               "compacted — keep using them):\n" + block)
+    _emit({"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                  "additionalContext": ctx}})
 
 
 def _merged_store(cwd: str) -> Store:

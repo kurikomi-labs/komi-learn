@@ -27,11 +27,16 @@ from typing import Optional
 
 from . import paths
 
-HOOK_EVENTS = ("SessionStart", "Stop", "SubagentStop")
+HOOK_EVENTS = ("SessionStart", "Stop", "SubagentStop", "PostCompact")
 _HOOK_MODULES = {
     "SessionStart": "komi.adapters.claude_code.hook_recall",
     "Stop": "komi.adapters.claude_code.hook_distill",
     "SubagentStop": "komi.adapters.claude_code.hook_distill",
+    # PostCompact re-injects recalled learnings after a /compact (the SessionStart
+    # hook also fires with source=compact, but that path's injection is unreliable on
+    # current Claude Code — issue #15174 — so we register both). hook_compact routes
+    # through hook_recall.main(), which emits the format each event supports.
+    "PostCompact": "komi.adapters.claude_code.hook_compact",
 }
 _HOOK_MARKER = "komi.adapters.claude_code"
 
