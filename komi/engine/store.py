@@ -28,7 +28,7 @@ import tempfile
 from pathlib import Path
 from typing import Iterable, Optional
 
-from .model import Learning, LearningType, Scope, _now_iso
+from .model import Learning, LearningType, Scope, Visibility, _now_iso
 
 ENTRY_DELIMITER = "\n§\n"          # U+00A7, matches Hermes' MEMORY/USER format
 _FILE_FOR_TYPE = {
@@ -44,6 +44,12 @@ class Store:
     def __init__(self, root: str | Path, *, index_path: Optional[str | Path] = None):
         self.root = Path(root).expanduser()
         self.root.mkdir(parents=True, exist_ok=True)
+        # Born safe-to-commit: drop a .gitignore so private (.local) learnings, the
+        # derived index, the signing key, and state are NEVER version-controlled,
+        # while the SHAREABLE MEMORY.md/USER.md/skills/ CAN be committed and travel
+        # to clones. Idempotent + cheap (skips if present) — this is the structural
+        # fix that lets project memory be shared without leaking confidential data.
+        self._ensure_gitignore()
         # Stable key identifying this store's rows within a (possibly shared) index,
         # so reindex/clears only touch this store's own slice.
         self._root_key = str(self.root.resolve())
@@ -52,13 +58,55 @@ class Store:
         self.index_path = Path(index_path).expanduser() if index_path else self.root / "index.db"
         self._db = self._open_db(self.index_path)
 
+    # The gitignore that makes a komi root safe to version-control. The shareable
+    # files are deliberately NOT ignored — committing them is the whole point of
+    # project scope (a clone/teammate inherits the craft knowledge).
+    _GITIGNORE = """# komi-learn — keep private + derived data out of version control.
+# Shareable project memory (MEMORY.md, USER.md, skills/) IS meant to be committed.
+
+# Private / confidential learnings (cap tables, strategy, etc.) — local only:
+*.local.md
+skills.local/
+
+# Derived cache + machine/runtime state — never useful in git:
+index.db
+index.db-shm
+index.db-wal
+state.json
+state.lock
+
+# Signing key + secrets — must never be committed:
+keys/
+.env
+"""
+
+    def _ensure_gitignore(self) -> None:
+        gi = self.root / ".gitignore"
+        if gi.exists():
+            return                       # don't clobber a user-customized one
+        try:
+            gi.write_text(self._GITIGNORE, encoding="utf-8")
+        except Exception:
+            pass                         # best-effort; never fail store init on this
+
     # ── Markdown persistence ────────────────────────────────────────────
 
-    def _md_path(self, learning_type: str) -> Path:
+    def _md_path(self, learning_type: str, visibility: str = Visibility.SHAREABLE.value) -> Path:
         fname = _FILE_FOR_TYPE.get(learning_type)
         if not fname:
             raise ValueError(f"No markdown file for learning type {learning_type!r}")
+        if visibility == Visibility.PRIVATE.value:
+            # Private learnings live in a `.local` sibling (MEMORY.md -> MEMORY.local.md)
+            # that install gitignores, so confidential knowledge is never committed —
+            # while the shareable file CAN be committed and travels to clones.
+            fname = fname.replace(".md", ".local.md")
         return self.root / fname
+
+    def _md_paths_all(self, learning_type: str) -> list[Path]:
+        """Both the shareable and private files for a type (for reads that must see
+        everything locally — recall, reindex, all())."""
+        return [self._md_path(learning_type, Visibility.SHAREABLE.value),
+                self._md_path(learning_type, Visibility.PRIVATE.value)]
 
     def _read_entries(self, path: Path) -> list[dict]:
         """Each entry is a fenced JSON block between § delimiters. We store the
@@ -131,7 +179,9 @@ class Store:
             # procedural learnings are persisted as skills/<slug>/SKILL.md
             return self._upsert_skill(learning)
 
-        path = self._md_path(learning.type)
+        # Route by visibility: private → MEMORY.local.md (gitignored), shareable →
+        # MEMORY.md (committable). A given id lives in exactly one of the two files.
+        path = self._md_path(learning.type, learning.visibility)
         entries = self._read_entries(path)
         by_id = {e.get("id"): e for e in entries}
 
@@ -155,14 +205,27 @@ class Store:
     def all(self) -> list[Learning]:
         out: list[Learning] = []
         for t in _FILE_FOR_TYPE:
-            out.extend(Learning.from_dict(e) for e in self._read_entries(self._md_path(t)))
+            for path in self._md_paths_all(t):    # shareable + private (.local)
+                out.extend(Learning.from_dict(e) for e in self._read_entries(path))
         out.extend(self._read_skills())
         return out
 
     # ── skills/ persistence (procedural learnings) ──────────────────────
 
-    def _skills_dir(self) -> Path:
-        return self.root / "skills"
+    def _skills_dir(self, visibility: str = Visibility.SHAREABLE.value) -> Path:
+        # Private procedural skills live in `skills.local/` (gitignored), shareable in
+        # `skills/` (committable) — same split as MEMORY.md vs MEMORY.local.md.
+        return self.root / ("skills.local" if visibility == Visibility.PRIVATE.value else "skills")
+
+    def _skills_dirs_all(self) -> list[Path]:
+        return [self._skills_dir(Visibility.SHAREABLE.value),
+                self._skills_dir(Visibility.PRIVATE.value)]
+
+    def _all_skill_files(self):
+        """Every SKILL.md across skills/ and skills.local/ (for scan/erase paths)."""
+        for d in self._skills_dirs_all():
+            if d.exists():
+                yield from d.glob("*/SKILL.md")
 
     def _skill_slug(self, learning: Learning) -> str:
         base = re.sub(r"[^a-z0-9]+", "-", (learning.title or "skill").lower()).strip("-")[:48]
@@ -176,7 +239,7 @@ class Store:
         Keying purely on the id makes the path stable across title edits — the
         human-readable name lives in the SKILL.md frontmatter, where edits are free."""
         short = learning.id.split(":", 1)[-1][:16]
-        return self._skills_dir() / short
+        return self._skills_dir(learning.visibility) / short
 
     def _upsert_skill(self, learning: Learning) -> str:
         """Persist a procedural learning as ``skills/<id>/SKILL.md`` (id-keyed dir).
@@ -221,21 +284,22 @@ class Store:
         )
 
     def _read_skills(self) -> list[Learning]:
-        d = self._skills_dir()
-        if not d.exists():
-            return []
         # Dedup by id, keeping the most-recently-modified file. This tolerates
         # legacy slug-named dirs (pre-id-keying) that may duplicate an id, so a
         # title edit in the old scheme can't surface two copies of one learning.
+        # Reads BOTH skills/ (shareable) and skills.local/ (private).
         by_id: dict[str, tuple[float, Learning]] = {}
-        for skill_md in d.glob("*/SKILL.md"):
-            rec = _extract_json_block(skill_md.read_text(encoding="utf-8", errors="replace"))
-            if rec is None:
+        for d in self._skills_dirs_all():
+            if not d.exists():
                 continue
-            lng = Learning.from_dict(rec)
-            mtime = skill_md.stat().st_mtime
-            if lng.id not in by_id or mtime > by_id[lng.id][0]:
-                by_id[lng.id] = (mtime, lng)
+            for skill_md in d.glob("*/SKILL.md"):
+                rec = _extract_json_block(skill_md.read_text(encoding="utf-8", errors="replace"))
+                if rec is None:
+                    continue
+                lng = Learning.from_dict(rec)
+                mtime = skill_md.stat().st_mtime
+                if lng.id not in by_id or mtime > by_id[lng.id][0]:
+                    by_id[lng.id] = (mtime, lng)
         return [lng for _, lng in by_id.values()]
 
     def get(self, learning_id: str) -> Optional[Learning]:
@@ -247,22 +311,22 @@ class Store:
     def archive(self, learning_id: str) -> bool:
         """Archive (never delete) — the maximum destructive action, per Hermes."""
         for t in _FILE_FOR_TYPE:
-            path = self._md_path(t)
-            entries = self._read_entries(path)
-            changed = False
-            for e in entries:
-                if e.get("id") == learning_id:
-                    e.setdefault("lifecycle", {})["state"] = "archived"
-                    changed = True
-            if changed:
-                text = ENTRY_DELIMITER.join(self._render_entry(e) for e in entries) + "\n"
-                self._atomic_write(path, text)
-                self._db.execute("UPDATE learnings SET state='archived' WHERE id=?",
-                                 (learning_id,))
-                self._db.commit()
-                return True
+            for path in self._md_paths_all(t):     # shareable + private (.local)
+                entries = self._read_entries(path)
+                changed = False
+                for e in entries:
+                    if e.get("id") == learning_id:
+                        e.setdefault("lifecycle", {})["state"] = "archived"
+                        changed = True
+                if changed:
+                    text = ENTRY_DELIMITER.join(self._render_entry(e) for e in entries) + "\n"
+                    self._atomic_write(path, text)
+                    self._db.execute("UPDATE learnings SET state='archived' WHERE id=?",
+                                     (learning_id,))
+                    self._db.commit()
+                    return True
         # skills: flip state in the SKILL.md record (file kept — archived, not deleted)
-        for skill_md in self._skills_dir().glob("*/SKILL.md"):
+        for skill_md in self._all_skill_files():
             rec = _extract_json_block(skill_md.read_text(encoding="utf-8", errors="replace"))
             if rec and rec.get("id") == learning_id:
                 lng = Learning.from_dict(rec)
@@ -282,20 +346,20 @@ class Store:
         True if anything was removed."""
         import shutil
         removed = False
-        # markdown-backed types: drop the matching entry entirely
+        # markdown-backed types: drop the matching entry entirely (both files)
         for t in _FILE_FOR_TYPE:
-            path = self._md_path(t)
-            entries = self._read_entries(path)
-            kept = [e for e in entries if e.get("id") != learning_id]
-            if len(kept) != len(entries):
-                if kept:
-                    text = ENTRY_DELIMITER.join(self._render_entry(e) for e in kept) + "\n"
-                    self._atomic_write(path, text)
-                elif path.exists():
-                    path.unlink()          # last entry gone → remove the now-empty file
-                removed = True
-        # skills: remove the whole skill directory
-        for skill_md in self._skills_dir().glob("*/SKILL.md"):
+            for path in self._md_paths_all(t):
+                entries = self._read_entries(path)
+                kept = [e for e in entries if e.get("id") != learning_id]
+                if len(kept) != len(entries):
+                    if kept:
+                        text = ENTRY_DELIMITER.join(self._render_entry(e) for e in kept) + "\n"
+                        self._atomic_write(path, text)
+                    elif path.exists():
+                        path.unlink()      # last entry gone → remove the now-empty file
+                    removed = True
+        # skills: remove the whole skill directory (skills/ or skills.local/)
+        for skill_md in self._all_skill_files():
             rec = _extract_json_block(skill_md.read_text(encoding="utf-8", errors="replace"))
             if rec and rec.get("id") == learning_id:
                 shutil.rmtree(skill_md.parent, ignore_errors=True)

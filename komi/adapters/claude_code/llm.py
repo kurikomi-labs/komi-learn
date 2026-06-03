@@ -118,6 +118,7 @@ or whether it is specific to this project's conventions.
 Return ONLY a JSON object:
 {
   "scope": "global" | "project",
+  "visibility": "shareable" | "private",
   "category": "<keep or refine the category>",
   "generalized_title": "<if global: rewrite title to be general, stripping any
       project/user/machine specifics>",
@@ -131,7 +132,15 @@ Rules:
 - "global" ONLY if the lesson holds for many people and contains NO identifiers,
   names, paths, repo/org names, or anything user/machine-specific. When unsure → "project".
 - A learning that depends on this project's structure, naming, or private choices → "project".
-- Be conservative: a wrong "global" leaks specifics into a public pool. Default "project"."""
+- Be conservative: a wrong "global" leaks specifics into a public pool. Default "project".
+- "visibility" is SEPARATE from scope and protects against committing/sharing
+  CONFIDENTIAL business data. Set "private" if the lesson contains or is about:
+  equity / cap tables / shares / valuation, fundraising / investors / term sheets,
+  revenue / ARR / MRR / salaries, internal strategy / competitive positioning /
+  unreleased roadmap, acquisitions, or anything plainly confidential. Otherwise
+  "shareable" (the default — normal engineering/craft knowledge is shareable).
+- A "private" learning is NEVER "global" (confidential data must never reach the
+  pool). When unsure whether something is sensitive business info → "private"."""
 
 
 def build_llm(*, prefer: str = "oauth"):

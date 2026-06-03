@@ -27,7 +27,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Protocol
 
-from .model import Learning, Scope, Category
+from .model import Learning, Scope, Category, Visibility
 
 
 # ── Detector library ──────────────────────────────────────────────────────
@@ -73,6 +73,28 @@ _PII_PATTERNS = [
     re.compile(r"\b(?:\d[ -]{0,2}){13,16}\b"),                     # credit-card-ish (13-16 digits)
 ]
 
+# Business-CONFIDENTIAL content. These carry no secret/PII *pattern* (so the
+# secret/PII/identifier floors never catch them), but they must never be committed
+# to a repo or pooled: equity/cap tables, fundraising, revenue, comp, internal
+# strategy, M&A. A match forces visibility=private (local-only) and bars global.
+# Conservative-by-design: a false positive only makes a sharable lesson local
+# (cheap); a false negative leaks confidential business data (expensive). Word-
+# boundaried + case-insensitive; this is a topic floor, not a credential scanner.
+_CONFIDENTIAL_PATTERNS = [
+    re.compile(r"(?i)\bcap[\s-]?table\b"),
+    re.compile(r"(?i)\b(?:authorized|issued|unissued|common|preferred)\s+shares?\b"),
+    re.compile(r"(?i)\b\d[\d,.]*\s*(?:k|m|mm|million|billion)?\s+shares?\b"),
+    re.compile(r"(?i)\bshares?\s+(?:of|to)\s+(?:common|preferred|the\s+founder)\b"),
+    re.compile(r"(?i)\b(?:option\s+pool|stock\s+options?|RSUs?|vesting|equity\s+(?:grant|split|stake))\b"),
+    re.compile(r"(?i)\b(?:par\s+value|fully[\s-]?diluted|pre[\s-]?money|post[\s-]?money|valuation)\b"),
+    re.compile(r"(?i)\b(?:fundrais\w+|seed\s+round|series\s+[a-d]\b|term\s+sheet|SAFE\s+note|convertible\s+note|angel\s+investor|venture\s+capital|cap\s+raise)\b"),
+    re.compile(r"(?i)\b(?:ARR|MRR|runway|burn\s+rate|gross\s+margin|net\s+revenue|revenue\s+(?:of|target)|profit\s+margin)\b"),
+    re.compile(r"(?i)\b(?:salary|salaries|compensation|comp\s+package|payroll|equity\s+compensation)\b"),
+    re.compile(r"(?i)\b(?:acquisition\s+(?:offer|target|talks)|M&A|merger|due\s+diligence)\b"),
+    re.compile(r"(?i)\b(?:moat\s+(?:vs|against)|competitive\s+(?:moat|advantage\s+over)|unreleased\s+(?:roadmap|product)|confidential|trade\s+secret|under\s+NDA)\b"),
+    re.compile(r"(?i)\b(?:Stripe\s+Atlas|Carta|Pulley|Delaware\s+C-?Corp|incorporat\w+\s+default)\b"),
+]
+
 _IDENTIFIER_PATTERNS = [
     re.compile(r"(?i)\b[A-Z]:\\Users\\[^\\\s]{1,200}"),            # Windows home path
     re.compile(r"/(?:home|Users)/[^/\s]{1,200}"),                 # *nix / macOS home path
@@ -91,6 +113,7 @@ class FloorResult:
     blocked: bool                       # True = a hard detector fired
     reasons: list[str] = field(default_factory=list)
     secret: bool = False                # secret → reject entirely, not just demote
+    confidential: bool = False          # business-confidential → force private + bar global
 
 
 def safety_floor(text: str, *, project_terms: Optional[list[str]] = None) -> FloorResult:
@@ -106,6 +129,7 @@ def safety_floor(text: str, *, project_terms: Optional[list[str]] = None) -> Flo
         text = text[:20000]
     reasons: list[str] = []
     secret = False
+    confidential = False
     for pat in _SECRET_PATTERNS:
         if pat.search(text):
             reasons.append("secret/credential")
@@ -119,19 +143,28 @@ def safety_floor(text: str, *, project_terms: Optional[list[str]] = None) -> Flo
         if pat.search(text):
             reasons.append("machine-identifier")
             break
+    for pat in _CONFIDENTIAL_PATTERNS:
+        if pat.search(text):
+            reasons.append("business-confidential")
+            confidential = True
+            break
     for term in (project_terms or []):
         if term and len(term) >= 3 and re.search(rf"\b{re.escape(term)}\b", text, re.I):
             reasons.append(f"project-term:{term}")
             break
-    return FloorResult(blocked=bool(reasons), reasons=reasons, secret=secret)
+    return FloorResult(blocked=bool(reasons), reasons=reasons, secret=secret,
+                       confidential=confidential)
 
 
 # ── LLM judgment (pluggable) ──────────────────────────────────────────────
 
 class ScopeJudge(Protocol):
-    """Stage-2. Returns a dict: {scope: 'project'|'global', generalized_body: str,
-    generalized_title: str, category: str, rationale: str}. Implementations live in
-    adapters (real LLM) and tests (mock)."""
+    """Stage-2. Returns a dict: {scope: 'personal'|'project'|'global', visibility:
+    'shareable'|'private', generalized_body: str, generalized_title: str, category:
+    str, rationale: str}. ``visibility`` lets the LLM catch confidential content the
+    regex floor misses (paraphrased financials/strategy) — 'private' forces local-
+    only storage and bars the pool. Implementations live in adapters (real LLM) and
+    tests (mock)."""
     def __call__(self, learning: Learning, *, context: dict) -> dict: ...
 
 
@@ -142,6 +175,7 @@ class Classification:
     reasons: list[str]
     rejected: bool = False              # secret detected → do not store at all
     generalized: Optional[Learning] = None  # rewritten global-ready form, if scope==global
+    visibility: str = Visibility.SHAREABLE.value  # shareable | private (private bars global + commit)
 
 
 def classify(
@@ -159,26 +193,33 @@ def classify(
 
     # Stage 0/1 — the floor.
     floor = safety_floor(joined, project_terms=project_terms)
+    # Confidential content (cap tables, fundraising, revenue, strategy) is marked
+    # PRIVATE no matter what scope it lands in, so it routes to local-only storage
+    # and is barred from the pool. Computed once; stamped on every outcome below.
+    vis = Visibility.PRIVATE.value if floor.confidential else Visibility.SHAREABLE.value
+
     if floor.secret:
         return Classification(scope=Scope.PERSONAL.value, category=learning.category,
-                              reasons=floor.reasons, rejected=True)
+                              reasons=floor.reasons, rejected=True, visibility=vis)
 
     # Environment-category learnings are ALWAYS personal (Hermes anti-capture rule:
     # local setup state must never harden into a shared/global constraint).
     if learning.category == Category.ENVIRONMENT.value:
         return Classification(scope=Scope.PERSONAL.value, category=learning.category,
-                              reasons=["environment-always-personal"])
+                              reasons=["environment-always-personal"], visibility=vis)
 
     # Identity learnings are about the user → personal by definition.
     if learning.type == "identity":
         return Classification(scope=Scope.PERSONAL.value, category=learning.category,
-                              reasons=["identity-is-personal"])
+                              reasons=["identity-is-personal"], visibility=vis)
 
     if floor.blocked:
-        # Has identifiers but isn't a secret → can live as project knowledge,
-        # but is barred from global. (PII still forces personal.)
+        # Has identifiers/confidential content but isn't a secret → can live as
+        # project knowledge, but is barred from global. (PII still forces personal;
+        # confidential forces private storage via ``vis``.)
         scope = Scope.PERSONAL.value if "pii" in floor.reasons else Scope.PROJECT.value
-        return Classification(scope=scope, category=learning.category, reasons=floor.reasons)
+        return Classification(scope=scope, category=learning.category,
+                              reasons=floor.reasons, visibility=vis)
 
     # Stage 2 — survived the floor; ask the judge whether it's truly general.
     if judge is None:
@@ -189,6 +230,15 @@ def classify(
     verdict = judge(learning, context=context or {})
     scope = verdict.get("scope", Scope.PROJECT.value)
     category = verdict.get("category", learning.category)
+
+    # The LLM is the second line of defense for confidential content the regex floor
+    # can't pattern-match (e.g. paraphrased strategy). If it flags private, force
+    # private + bar global — confidential never reaches the pool, by either path.
+    if verdict.get("visibility") == Visibility.PRIVATE.value:
+        keep = Scope.PERSONAL.value if scope == Scope.PERSONAL.value else Scope.PROJECT.value
+        return Classification(scope=keep, category=category,
+                              reasons=[verdict.get("rationale", "llm-private")],
+                              visibility=Visibility.PRIVATE.value)
 
     if scope == Scope.GLOBAL.value:
         gen = Learning.from_dict(learning.to_dict())

@@ -173,6 +173,7 @@ def distill(
 
         lng.scope = cls.scope
         lng.category = cls.category
+        lng.visibility = cls.visibility   # shareable|private → routes storage + bars pool
 
         if cls.scope == Scope.GLOBAL.value and cls.generalized is not None:
             # The user-specific original (if any) still belongs in a local store;

@@ -246,6 +246,25 @@ _IDENT = [
     re.compile(r"(?i)\b[a-z0-9-]{1,100}\.onion\b"),
 ]
 
+# Business-CONFIDENTIAL content floor — MUST stay byte-identical to
+# komi/engine/classify.py::_CONFIDENTIAL_PATTERNS (parity test enforces this). A
+# match blocks the learning from the public pool: confidential business data has no
+# place in a shared knowledge pool even if it carries no secret/PII pattern.
+_CONFIDENTIAL = [
+    re.compile(r"(?i)\bcap[\s-]?table\b"),
+    re.compile(r"(?i)\b(?:authorized|issued|unissued|common|preferred)\s+shares?\b"),
+    re.compile(r"(?i)\b\d[\d,.]*\s*(?:k|m|mm|million|billion)?\s+shares?\b"),
+    re.compile(r"(?i)\bshares?\s+(?:of|to)\s+(?:common|preferred|the\s+founder)\b"),
+    re.compile(r"(?i)\b(?:option\s+pool|stock\s+options?|RSUs?|vesting|equity\s+(?:grant|split|stake))\b"),
+    re.compile(r"(?i)\b(?:par\s+value|fully[\s-]?diluted|pre[\s-]?money|post[\s-]?money|valuation)\b"),
+    re.compile(r"(?i)\b(?:fundrais\w+|seed\s+round|series\s+[a-d]\b|term\s+sheet|SAFE\s+note|convertible\s+note|angel\s+investor|venture\s+capital|cap\s+raise)\b"),
+    re.compile(r"(?i)\b(?:ARR|MRR|runway|burn\s+rate|gross\s+margin|net\s+revenue|revenue\s+(?:of|target)|profit\s+margin)\b"),
+    re.compile(r"(?i)\b(?:salary|salaries|compensation|comp\s+package|payroll|equity\s+compensation)\b"),
+    re.compile(r"(?i)\b(?:acquisition\s+(?:offer|target|talks)|M&A|merger|due\s+diligence)\b"),
+    re.compile(r"(?i)\b(?:moat\s+(?:vs|against)|competitive\s+(?:moat|advantage\s+over)|unreleased\s+(?:roadmap|product)|confidential|trade\s+secret|under\s+NDA)\b"),
+    re.compile(r"(?i)\b(?:Stripe\s+Atlas|Carta|Pulley|Delaware\s+C-?Corp|incorporat\w+\s+default)\b"),
+]
+
 
 def scrub_problems(text: str) -> list[str]:
     if text and len(text) > 20000:
@@ -257,6 +276,8 @@ def scrub_problems(text: str) -> list[str]:
         out.append("pii")
     if any(p.search(text) for p in _IDENT):
         out.append("machine-identifier")
+    if any(p.search(text) for p in _CONFIDENTIAL):
+        out.append("business-confidential")
     return out
 
 

@@ -42,6 +42,20 @@ class Scope(str, Enum):
     GLOBAL = "global"      # generally true; eligible (after review) for the public pool
 
 
+class Visibility(str, Enum):
+    """ORTHOGONAL to scope. Scope = how widely a lesson applies; visibility = who
+    may SEE it. A lesson can be project-scoped yet confidential (a cap table is a
+    'project fact' but must never be committed/shared), or project-scoped and freely
+    shareable (a repo's design-token convention). This axis is the difference between
+    'safe to version-control / share with collaborators' and 'stays on my disk'.
+
+    Default is SHAREABLE (most distilled craft is), but the confidential floor in the
+    classifier forces PRIVATE on financial/equity/fundraising/strategy content, and a
+    PRIVATE learning can never be GLOBAL (never reaches the public pool)."""
+    SHAREABLE = "shareable"   # safe to commit + share with collaborators (and, if global, pool-eligible)
+    PRIVATE = "private"       # confidential — local only, never committed, never pooled
+
+
 class Category(str, Enum):
     TOOLING = "tooling"
     WORKFLOW = "workflow"
@@ -113,6 +127,12 @@ class Learning:
     tags: list[str] = field(default_factory=list)
     scope: str = Scope.PERSONAL.value
     confidence: float = 0.3
+
+    # Handling policy, ORTHOGONAL to scope and DELIBERATELY NOT part of content_view/
+    # the id (a private flag is local policy, not content — the same lesson must hash
+    # identically whether or not someone marks it private, just like usage/lifecycle).
+    # Default shareable; the classifier's confidential floor moves things to private.
+    visibility: str = Visibility.SHAREABLE.value
 
     id: str = ""
     schema: str = SCHEMA
