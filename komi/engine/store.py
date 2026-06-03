@@ -216,9 +216,20 @@ class Store:
         path = self._md_path(learning.type, learning.visibility)
         entries = self._read_entries(path)
         by_id = {e.get("id"): e for e in entries}
-        # carry forward telemetry from the moved copy, if any
+        # Carry forward ALL persistent telemetry from the moved copy (a re-distilled
+        # learning is a FRESH object with zeroed usage/lifecycle), mirroring the
+        # skill path's prior-merge — otherwise a visibility flip silently drops the
+        # user's pin, true creation date, and reuse count (which the curator uses to
+        # decide what's prunable).
         if prior and learning.id not in by_id:
             learning.confidence = max(learning.confidence, prior.get("confidence", 0.3))
+            pu = prior.get("usage", {}) or {}
+            learning.usage.reused = max(learning.usage.reused, pu.get("reused", 0) or 0)
+            learning.usage.last_used = learning.usage.last_used or pu.get("last_used")
+            pl = prior.get("lifecycle", {}) or {}
+            if pl.get("created_at"):
+                learning.lifecycle.created_at = pl["created_at"]
+            learning.lifecycle.pinned = learning.lifecycle.pinned or bool(pl.get("pinned"))
 
         if learning.id in by_id:
             existing = by_id[learning.id]
@@ -260,6 +271,7 @@ class Store:
                                   " ".join(lng.tags or [])])
             if safety_floor(joined).confidential:
                 lng.visibility = Visibility.PRIVATE.value
+                lng._normalize_visibility()   # keep the invariant: a global learning becomes project
                 self.upsert(lng)          # single-residency moves it out of the committable file
                 moved.append(lng)
         return moved

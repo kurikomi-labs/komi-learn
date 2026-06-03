@@ -264,13 +264,13 @@ _CONFIDENTIAL = [
     re.compile(r"(?i)\bfounder\s+(?:owns?|holds?|keeps?|retains?|gets?)\b"),
     re.compile(r"(?i)\b(?:fundrais\w+|seed\s+round|series\s+[a-d]\s+(?:round|funding|financing|investment)|term\s+sheet|convertible\s+note\s+(?:at|for|with|of|round)|angel\s+investor|venture\s+capital|cap\s+raise|liquidation\s+preference|friends\s+and\s+family\s+(?:round|raise)|409a)\b"),
     re.compile(r"\bSAFE\s+(?:note|round|financing|agreement)\b"),
-    re.compile(r"(?i)\b(?:ARR|MRR)\b"),
+    re.compile(r"\b(?:ARR|MRR)\b"),   # case-SENSITIVE: the acronyms are uppercase; lowercase `arr` is a variable name
     re.compile(r"(?i)\b(?:monthly\s+recurring\s+revenue|annual\s+recurring\s+revenue|net\s+revenue|gross\s+revenue|revenue\s+(?:was|is|target|projection)|revenue\s+of\s+(?:\$|\d|about|around|roughly)|in\s+revenue|profit\s+(?:was|of|last)|net\s+income|gross\s+margins?\s+(?:are|were)\s+\d|profit\s+margins?\s+(?:are|were)\s+\d)\b"),
-    re.compile(r"(?i)\b(?:cash\s+runway|months?\s+of\s+(?:cash|runway)|monthly\s+burn|we'?re?\s+burning|we\s+burn\s+(?:\$|\d|through)|burn\s+rate\s+(?:of|is)\s+\$?\d)"),
+    re.compile(r"(?i)\b(?:cash\s+runway|months?\s+of\s+(?:cash|runway)|monthly\s+burn|we'?re?\s+burning\s+(?:\$|\d|cash|money)|we\s+burn\s+(?:\$|\d|cash)|burn\s+rate\s+(?:of|is)\s+\$?\d)"),
     re.compile(r"(?i)\b(?:employee|executive|founder|engineer|hire)\s+(?:salary|salaries|compensation|comp\b)|(?:salary|comp)\s+(?:band|package|range)|equity\s+compensation|base\s+salary\s+of\s+\$?\d|\$\d[\d,]*\s*(?:k|/yr|/year|base)\b"),
     re.compile(r"(?i)\b(?:acquisition\s+(?:offer|target|talks)|merger\s+(?:&|and|agreement|with)|merger\s+and\s+acquisition|due\s+diligence\s+(?:on\s+(?:the\s+)?(?:company|acquisition|deal)|process)|(?:acqui\w+|buy\w*|purchas\w+|sell\w*|sold)\s+(?:the\s+|our\s+|us\b)?(?:company|startup|business)|\bexit\s+(?:strategy|valuation)\b|exit\s+the\s+company)\b"),
     re.compile(r"(?i)\b(?:moat\s+(?:vs|against)|competitive\s+moat|unreleased\s+(?:roadmap|product)|trade\s+secret|under\s+NDA|business[\s-]confidential)\b"),
-    re.compile(r"(?i)\b(?:Stripe\s+Atlas|\bCarta\b|\bPulley\b|Delaware\s+C-?Corp|incorporat\w+\s+default)\b"),
+    re.compile(r"(?i)\b(?:Stripe\s+Atlas|\bCarta\b|\bPulley\b|Delaware\s+C-?Corp|incorporation\s+defaults?)\b"),
 ]
 
 

@@ -582,13 +582,16 @@ def cmd_reclassify(args) -> int:
     """Re-scan existing learnings and move any now-confidential ones to private
     (.local) storage. Useful after upgrading: memory distilled before the visibility
     feature stays in the committable file until you run this."""
+    import os
     from komi.engine.store import Store
     paths = _host_paths(getattr(args, "host", "claude-code"))
     moved = []
-    # personal root + (if in a project) the project root
+    # personal root + (if in a project) the project root. Default cwd to the actual
+    # working directory — the project's .claude/komi/MEMORY.md is the committable
+    # file this command exists to clean, so it MUST be scanned when run in a project.
     roots = [paths.personal_root()]
-    proot = getattr(paths, "project_root", lambda c: None)(getattr(args, "cwd", "") or "")
-    if proot is not None:
+    proot = getattr(paths, "project_root", lambda c: None)(getattr(args, "cwd", "") or os.getcwd())
+    if proot is not None and proot not in roots:
         roots.append(proot)
     for root in roots:
         try:

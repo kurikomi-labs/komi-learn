@@ -11,6 +11,7 @@ a deterministic confidential floor + the LLM mark them private, and a safe
 import os
 import tempfile
 import importlib
+from unittest import mock
 
 import pytest
 
@@ -222,6 +223,14 @@ _FALSE_POSITIVE_PROBES = [
     "do due diligence on the dependency licenses",
     "our competitive advantage over the baseline model is speed",
     "set the revenue of the mock store fixture to 100",
+    # ultrareview merged_bug_001 — these MUST stay clean (komi's own user vocab)
+    "let arr = [1,2,3]; iterate over arr",
+    "pass arr to the helper and sort it",
+    "the framework incorporates default values for users",
+    "this constructor incorporates default settings",
+    "we burn through tokens too fast in this loop",
+    "we burn through GPU memory under load",
+    "we burn through API quota on retries",
 ]
 # Recall battery: plain-language confidential the OLD patterns missed.
 _FALSE_NEGATIVE_PROBES = [
@@ -401,3 +410,117 @@ def test_detector_patterns_byte_identical_with_verifier():
     ]
     for engine_set, vendored_set in pairs:
         assert [p.pattern for p in engine_set] == [p.pattern for p in vendored_set]
+
+
+# ── ultrareview-round fixes ───────────────────────────────────────────────────
+
+def test_identity_no_judge_confidential_paraphrase_is_private():
+    """bug_011: an identity learning with paraphrased confidential content + NO
+    judge must be PRIVATE (USER.local.md), not committed to USER.md."""
+    L = Learning(type="identity", category="preference", title="role",
+                 body="I'm the CEO of Project Phoenix; we're prepping our IPO for Q3")
+    c = classify(L, judge=None)
+    assert c.scope == Scope.PERSONAL.value
+    assert c.visibility == Visibility.PRIVATE.value
+
+
+def test_environment_no_judge_defaults_private():
+    """bug_011: environment learning, no judge, regex-clean → fail-safe private."""
+    L = Learning(type="semantic", category="environment", title="env",
+                 body="set STEALTH_LAUNCH=true in .envrc until the Q4 unveiling")
+    c = classify(L, judge=None)
+    assert c.visibility == Visibility.PRIVATE.value
+
+
+def test_identity_judge_shareable_stays_shareable():
+    """A genuinely shareable identity preference, vetted shareable by the judge,
+    must remain committable (the fail-safe must not over-trap)."""
+    L = Learning(type="identity", category="preference", title="style",
+                 body="prefers concise commit messages")
+    c = classify(L, judge=lambda l, context: {"scope": "personal", "visibility": "shareable",
+                                              "category": l.category, "rationale": "style pref"})
+    assert c.visibility == Visibility.SHAREABLE.value
+
+
+def test_global_rewrite_failed_confidential_floor_is_private():
+    """bug_006: if the LLM's generalized text trips the CONFIDENTIAL floor, the
+    fallback must be private — not the shareable default."""
+    L = Learning(type="semantic", category="domain-knowledge", title="dilution note",
+                 body="we discussed significant dilution at the board meeting")
+    # judge says global + rewrites into text that trips the confidential floor
+    c = classify(L, judge=lambda l, context: {
+        "scope": "global", "category": l.category,
+        "generalized_title": "dilution", "generalized_body": "our pre-money valuation and cap table",
+        "rationale": "general"})
+    assert c.scope != Scope.GLOBAL.value
+    assert c.visibility == Visibility.PRIVATE.value
+
+
+def test_flip_preserves_pinned_created_at_and_usage(tmp_path):
+    """bug_008: a visibility flip must carry forward pin, true age, and reuse count."""
+    s = Store(tmp_path)
+    sh = Learning(type="semantic", category="domain-knowledge", title="Note", body="content",
+                  visibility="shareable").finalize()
+    sh.lifecycle.pinned = True
+    sh.lifecycle.created_at = "2020-01-01T00:00:00Z"
+    sh.usage.reused = 42
+    sh.usage.last_used = "2025-01-01T00:00:00Z"
+    s.upsert(sh)
+    # re-distilled as a FRESH object (zeroed telemetry), now private
+    pv = Learning(type="semantic", category="domain-knowledge", title="Note", body="content",
+                  visibility="private").finalize()
+    assert pv.id == sh.id
+    s.upsert(pv)
+    moved = next(l for l in s.all() if l.id == sh.id)
+    assert moved.lifecycle.pinned is True
+    assert moved.lifecycle.created_at == "2020-01-01T00:00:00Z"
+    assert moved.usage.reused == 42
+    assert moved.usage.last_used == "2025-01-01T00:00:00Z"
+    s.close()
+
+
+def test_reclassify_normalizes_global_to_project(tmp_path):
+    """bug_013: reclassifying a (shareable, global) confidential learning must not
+    leave the impossible (global, private) state — scope demotes to project."""
+    s = Store(tmp_path)
+    g = Learning(type="semantic", category="domain-knowledge", title="x",
+                 body="our cap table: 10M authorized shares", scope="global",
+                 visibility="shareable").finalize()
+    # finalize() doesn't demote shareable+global; persist it as such
+    s.upsert(g)
+    moved = s.reclassify_visibility()
+    assert g.id in {m.id for m in moved}
+    rec = next(l for l in s.all() if l.id == g.id)
+    assert rec.visibility == Visibility.PRIVATE.value
+    assert rec.scope == Scope.PROJECT.value          # normalized, never global+private
+    s.close()
+
+
+def test_reclassify_scans_project_root(tmp_path, monkeypatch):
+    """bug_002: `komi-learn reclassify` run in a project must scan the project's
+    .claude/komi/MEMORY.md (the committable file), not just the personal root."""
+    import os, importlib
+    from komi import cli
+    # personal root = an isolated home; project root = a separate cwd
+    home = tmp_path / "home"
+    proj = tmp_path / "proj"
+    (proj / ".claude" / "komi").mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    from komi.adapters.claude_code import paths
+    importlib.reload(paths)
+    # plant a confidential learning in the PROJECT store
+    proj_store = Store(proj / ".claude" / "komi", index_path=(home / "komi" / "index.db"))
+    leak = Learning(type="semantic", category="domain-knowledge", title="cap table",
+                    body="10M authorized shares; founder gets 9M", visibility="shareable").finalize()
+    proj_store.upsert(leak)
+    proj_store.close()
+    assert "cap table" in (proj / ".claude" / "komi" / "MEMORY.md").read_text(encoding="utf-8")
+    # run reclassify from the project dir
+    monkeypatch.chdir(proj)
+    ns = type("NS", (), {"host": "claude-code"})()
+    with mock.patch("sys.stdout"):
+        cli.cmd_reclassify(ns)
+    mem_path = proj / ".claude" / "komi" / "MEMORY.md"
+    mem = mem_path.read_text(encoding="utf-8") if mem_path.exists() else ""
+    assert "cap table" not in mem                          # moved out of the committable project file
+    assert "cap table" in (proj / ".claude" / "komi" / "MEMORY.local.md").read_text(encoding="utf-8")

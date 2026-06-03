@@ -108,15 +108,15 @@ _CONFIDENTIAL_PATTERNS = [
     re.compile(r"(?i)\b(?:fundrais\w+|seed\s+round|series\s+[a-d]\s+(?:round|funding|financing|investment)|term\s+sheet|convertible\s+note\s+(?:at|for|with|of|round)|angel\s+investor|venture\s+capital|cap\s+raise|liquidation\s+preference|friends\s+and\s+family\s+(?:round|raise)|409a)\b"),
     re.compile(r"\bSAFE\s+(?:note|round|financing|agreement)\b"),   # all-caps SAFE acronym (not "safe note about X")
     # revenue/financials — revenue/ARR/MRR are business-confidential in this context.
-    re.compile(r"(?i)\b(?:ARR|MRR)\b"),
+    re.compile(r"\b(?:ARR|MRR)\b"),   # case-SENSITIVE: the acronyms are uppercase; lowercase `arr` is a variable name
     re.compile(r"(?i)\b(?:monthly\s+recurring\s+revenue|annual\s+recurring\s+revenue|net\s+revenue|gross\s+revenue|revenue\s+(?:was|is|target|projection)|revenue\s+of\s+(?:\$|\d|about|around|roughly)|in\s+revenue|profit\s+(?:was|of|last)|net\s+income|gross\s+margins?\s+(?:are|were)\s+\d|profit\s+margins?\s+(?:are|were)\s+\d)\b"),
-    re.compile(r"(?i)\b(?:cash\s+runway|months?\s+of\s+(?:cash|runway)|monthly\s+burn|we'?re?\s+burning|we\s+burn\s+(?:\$|\d|through)|burn\s+rate\s+(?:of|is)\s+\$?\d)"),
+    re.compile(r"(?i)\b(?:cash\s+runway|months?\s+of\s+(?:cash|runway)|monthly\s+burn|we'?re?\s+burning\s+(?:\$|\d|cash|money)|we\s+burn\s+(?:\$|\d|cash)|burn\s+rate\s+(?:of|is)\s+\$?\d)"),
     # compensation — qualified so "compensate for latency" / saga "compensation" miss.
     re.compile(r"(?i)\b(?:employee|executive|founder|engineer|hire)\s+(?:salary|salaries|compensation|comp\b)|(?:salary|comp)\s+(?:band|package|range)|equity\s+compensation|base\s+salary\s+of\s+\$?\d|\$\d[\d,]*\s*(?:k|/yr|/year|base)\b"),
     # M&A / exit — plain words too ("Google approached us about buying the company").
     re.compile(r"(?i)\b(?:acquisition\s+(?:offer|target|talks)|merger\s+(?:&|and|agreement|with)|merger\s+and\s+acquisition|due\s+diligence\s+(?:on\s+(?:the\s+)?(?:company|acquisition|deal)|process)|(?:acqui\w+|buy\w*|purchas\w+|sell\w*|sold)\s+(?:the\s+|our\s+|us\b)?(?:company|startup|business)|\bexit\s+(?:strategy|valuation)\b|exit\s+the\s+company)\b"),
     re.compile(r"(?i)\b(?:moat\s+(?:vs|against)|competitive\s+moat|unreleased\s+(?:roadmap|product)|trade\s+secret|under\s+NDA|business[\s-]confidential)\b"),
-    re.compile(r"(?i)\b(?:Stripe\s+Atlas|\bCarta\b|\bPulley\b|Delaware\s+C-?Corp|incorporat\w+\s+default)\b"),
+    re.compile(r"(?i)\b(?:Stripe\s+Atlas|\bCarta\b|\bPulley\b|Delaware\s+C-?Corp|incorporation\s+defaults?)\b"),
 ]
 
 _IDENTIFIER_PATTERNS = [
@@ -202,6 +202,22 @@ class Classification:
     visibility: str = Visibility.SHAREABLE.value  # shareable | private (private bars global + commit)
 
 
+def _personal_visibility(learning: "Learning", judge, context) -> str:
+    """Visibility for an always-personal learning (identity/environment) whose regex
+    floor came back clean. Mirrors the main pipeline's fail-safe: ask the judge if
+    one exists (private if it flags private OR abstains — unvetted), else with no
+    judge fail safe to private. Only an explicit shareable judgment yields shareable."""
+    if judge is None:
+        return Visibility.PRIVATE.value          # unvetted local content stays in .local
+    try:
+        verdict = judge(learning, context=context or {})
+    except Exception:
+        return Visibility.PRIVATE.value
+    return (Visibility.SHAREABLE.value
+            if verdict.get("visibility") == Visibility.SHAREABLE.value
+            else Visibility.PRIVATE.value)
+
+
 def classify(
     learning: Learning,
     *,
@@ -226,16 +242,21 @@ def classify(
         return Classification(scope=Scope.PERSONAL.value, category=learning.category,
                               reasons=floor.reasons, rejected=True, visibility=vis)
 
-    # Environment-category learnings are ALWAYS personal (Hermes anti-capture rule:
-    # local setup state must never harden into a shared/global constraint).
-    if learning.category == Category.ENVIRONMENT.value:
+    # Environment-category and identity learnings are ALWAYS personal — but personal
+    # scope does NOT mean "safe to commit": a user's ~/.claude (or a project's
+    # .claude/komi) can be version-controlled, and identity/env is the most likely
+    # place for casual business disclosure ("I'm the CTO of <stealth co>", "set
+    # STEALTH=1 until launch"). So they get the SAME fail-safe + judge vetting as
+    # every other local path: confidential floor → private; else if a model can vet
+    # it, ask; else (no judge) fail safe to private rather than committing unvetted.
+    if (learning.category == Category.ENVIRONMENT.value or learning.type == "identity"):
+        reason = ("environment-always-personal" if learning.category == Category.ENVIRONMENT.value
+                  else "identity-is-personal")
+        pvis = vis
+        if not floor.confidential:
+            pvis = _personal_visibility(learning, judge, context)
         return Classification(scope=Scope.PERSONAL.value, category=learning.category,
-                              reasons=["environment-always-personal"], visibility=vis)
-
-    # Identity learnings are about the user → personal by definition.
-    if learning.type == "identity":
-        return Classification(scope=Scope.PERSONAL.value, category=learning.category,
-                              reasons=["identity-is-personal"], visibility=vis)
+                              reasons=[reason], visibility=pvis)
 
     if floor.blocked:
         # Has identifiers/confidential content but isn't a secret → can live as
@@ -297,8 +318,12 @@ def classify(
             project_terms=project_terms,
         )
         if recheck.blocked:
+            # The floor always wins: if the rewrite tripped the CONFIDENTIAL floor,
+            # that's a strong signal the topic is confidential → private, not the
+            # shareable default. (Identifier-only blocks stay shareable+project.)
             return Classification(scope=Scope.PROJECT.value, category=category,
-                                  reasons=["global-rewrite-failed-floor", *recheck.reasons])
+                                  reasons=["global-rewrite-failed-floor", *recheck.reasons],
+                                  visibility=(Visibility.PRIVATE.value if recheck.confidential else vis))
         gen.finalize()
         return Classification(scope=Scope.GLOBAL.value, category=category,
                               reasons=[verdict.get("rationale", "llm-global")],
