@@ -27,7 +27,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
-from .model import Learning, Scope
+from .model import Learning, Scope, Visibility
 from .store import Store
 
 
@@ -398,16 +398,33 @@ def _build_umbrella(merged: dict, members: list[Learning]) -> Learning:
     tags = sorted({t for m in members for t in (m.tags or [])} |
                   {t.strip().lower() for t in merged.get("tags", []) if t.strip()})
     conf = max([m.confidence for m in members] + [0.5])
+    # A merged umbrella is at least as sensitive as its most-sensitive member: if ANY
+    # member is private, the umbrella is private — otherwise consolidation would
+    # launder confidential content from a member's body into a committable skill.
+    visibility = (Visibility.PRIVATE.value
+                  if any(getattr(m, "visibility", Visibility.SHAREABLE.value)
+                         == Visibility.PRIVATE.value for m in members)
+                  else Visibility.SHAREABLE.value)
+    body = merged["body"].strip()
+    title = merged["title"].strip()
+    trigger = (merged.get("trigger") or members[0].trigger or "").strip()
+    # Re-run the confidential floor on the SYNTHESIZED text: the LLM merge can surface
+    # confidential phrasing even from shareable-looking members. The floor must win on
+    # consolidated content too (it does on freshly-distilled content).
+    from .classify import safety_floor
+    if safety_floor(" \n ".join([title, body, trigger, " ".join(tags)])).confidential:
+        visibility = Visibility.PRIVATE.value
     u = Learning(
         type="procedural",
         category=merged.get("category") or members[0].category,
-        title=merged["title"].strip(),
-        body=merged["body"].strip(),
-        trigger=(merged.get("trigger") or members[0].trigger or "").strip(),
+        title=title,
+        body=body,
+        trigger=trigger,
         tags=tags,
         scope=Scope.PROJECT.value if any(m.scope == Scope.PROJECT.value for m in members)
               else members[0].scope,
         confidence=min(1.0, conf),
+        visibility=visibility,
     )
     u.finalize()
     # Record lineage: which learnings were folded in. (Provenance, not content, so

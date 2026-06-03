@@ -168,8 +168,20 @@ class Learning:
             "tags": sorted({t.strip().lower() for t in self.tags if t.strip()}),
         }
 
+    def _normalize_visibility(self) -> None:
+        """Enforce the cross-axis invariant in ONE place every persistence path flows
+        through: a PRIVATE learning can never be GLOBAL (confidential content must
+        never reach the public pool). Demote scope to project — fail safe. This makes
+        'private bars global' a structural property of the object, not an emergent
+        property of the classifier's control flow, so curator umbrellas, pool pulls,
+        and hand-edited files can't mint the impossible global+private state."""
+        if (self.visibility == Visibility.PRIVATE.value
+                and self.scope == Scope.GLOBAL.value):
+            self.scope = Scope.PROJECT.value
+
     def finalize(self) -> "Learning":
         """Compute and assign the content-addressed id. Returns self for chaining."""
+        self._normalize_visibility()
         self.id = compute_id(self.content_view())
         now = _now_iso()
         if not self.lifecycle.created_at:
@@ -211,7 +223,11 @@ class Learning:
         # knows the count (the pull path) sets it explicitly AFTER from_dict from the
         # re-verified signer count. Defaults to 1 here.
         allowed_top = set(cls.__dataclass_fields__) - {"corroboration"}  # type: ignore[attr-defined]
-        return cls(**{k: v for k, v in d.items() if k in allowed_top})
+        obj = cls(**{k: v for k, v in d.items() if k in allowed_top})
+        # Enforce private⇒¬global on load too, so a hand-edited or pool-sourced file
+        # that claims scope=global + visibility=private is normalized, not trusted.
+        obj._normalize_visibility()
+        return obj
 
     def publishable(self) -> dict[str, Any]:
         """The form that may leave the device: content + DAG/signature provenance,

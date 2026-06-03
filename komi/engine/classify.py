@@ -80,19 +80,43 @@ _PII_PATTERNS = [
 # Conservative-by-design: a false positive only makes a sharable lesson local
 # (cheap); a false negative leaks confidential business data (expensive). Word-
 # boundaried + case-insensitive; this is a topic floor, not a credential scanner.
+#
+# Tuning note: this floor is a COARSE deterministic net, paired with the LLM judge
+# (the real recall lever for paraphrase) and a fail-safe-private default when no
+# judge ran. Patterns are ANCHORED to financial/equity context — bare words like
+# "shares", "vesting", "valuation", "series a", "merger", "runway", "compensation"
+# collide with ordinary engineering prose (DB shares, cache vesting, expression
+# valuation, time-series A, git merge, animation runway, latency compensation), so
+# matching them unqualified would gut the committable file. Precision matters as
+# much as recall here.
 _CONFIDENTIAL_PATTERNS = [
     re.compile(r"(?i)\bcap[\s-]?table\b"),
-    re.compile(r"(?i)\b(?:authorized|issued|unissued|common|preferred)\s+shares?\b"),
-    re.compile(r"(?i)\b\d[\d,.]*\s*(?:k|m|mm|million|billion)?\s+shares?\b"),
-    re.compile(r"(?i)\bshares?\s+(?:of|to)\s+(?:common|preferred|the\s+founder)\b"),
-    re.compile(r"(?i)\b(?:option\s+pool|stock\s+options?|RSUs?|vesting|equity\s+(?:grant|split|stake))\b"),
-    re.compile(r"(?i)\b(?:par\s+value|fully[\s-]?diluted|pre[\s-]?money|post[\s-]?money|valuation)\b"),
-    re.compile(r"(?i)\b(?:fundrais\w+|seed\s+round|series\s+[a-d]\b|term\s+sheet|SAFE\s+note|convertible\s+note|angel\s+investor|venture\s+capital|cap\s+raise)\b"),
-    re.compile(r"(?i)\b(?:ARR|MRR|runway|burn\s+rate|gross\s+margin|net\s+revenue|revenue\s+(?:of|target)|profit\s+margin)\b"),
-    re.compile(r"(?i)\b(?:salary|salaries|compensation|comp\s+package|payroll|equity\s+compensation)\b"),
-    re.compile(r"(?i)\b(?:acquisition\s+(?:offer|target|talks)|M&A|merger|due\s+diligence)\b"),
-    re.compile(r"(?i)\b(?:moat\s+(?:vs|against)|competitive\s+(?:moat|advantage\s+over)|unreleased\s+(?:roadmap|product)|confidential|trade\s+secret|under\s+NDA)\b"),
-    re.compile(r"(?i)\b(?:Stripe\s+Atlas|Carta|Pulley|Delaware\s+C-?Corp|incorporat\w+\s+default)\b"),
+    # equity SHARES — require an equity qualifier so "4 shares of the cache" / a
+    # GraphQL "preferred shares" field don't match.
+    re.compile(r"(?i)\b(?:authorized|unissued|outstanding|founder'?s?|treasury|vested|unvested)\s+shares?\b"),
+    re.compile(r"(?i)\bshares?\s+(?:issued|outstanding|authorized|vested|granted\s+to)\b"),
+    re.compile(r"(?i)\bshares?\s+of\s+(?:common|preferred)\s+stock\b"),
+    re.compile(r"(?i)\b\d[\d,.]*\s*(?:k|m|mm|million|billion)?\s+shares?\s+(?:to\s+the\s+founder|issued|authorized|outstanding|vested|granted|of\s+(?:common|preferred)\b)"),
+    re.compile(r"(?i)\b(?:option\s+pool|stock\s+option\s+(?:plan|grant)|\bRSUs?\b|equity\s+(?:grant|stake|compensation|package)|vesting\s+(?:schedule|cliff)|vesting\s+period\s+for\s+(?:shares|equity|options))\b"),
+    re.compile(r"(?i)\b(?:par\s+value\s+(?:of\s+)?\$|fully[\s-]?diluted|pre[\s-]?money|post[\s-]?money)\b"),
+    re.compile(r"(?i)\b(?:company|business|startup|pre[\s-]?money|post[\s-]?money)\s+valuation\b|\bvaluation\s+(?:of\s+\$|cap\b)"),
+    # equity-as-percentage / ownership — the most common way ownership is stated.
+    re.compile(r"(?i)\b\d{1,3}\s?%\s+(?:of\s+the\s+company|equity|stake|ownership|fully[\s-]?diluted)\b"),
+    re.compile(r"(?i)\b(?:owns?|holds?|keeps?|retains?|gets?|receives?)\s+\d{1,3}\s?%\s+(?:of\s+the\s+company|equity|stake|ownership)\b"),
+    re.compile(r"(?i)\bfounder\s+(?:owns?|holds?|keeps?|retains?|gets?)\b"),
+    # fundraising — "series [a-d]" anchored to funding context (not time-series A).
+    re.compile(r"(?i)\b(?:fundrais\w+|seed\s+round|series\s+[a-d]\s+(?:round|funding|financing|investment)|term\s+sheet|convertible\s+note\s+(?:at|for|with|of|round)|angel\s+investor|venture\s+capital|cap\s+raise|liquidation\s+preference|friends\s+and\s+family\s+(?:round|raise)|409a)\b"),
+    re.compile(r"\bSAFE\s+(?:note|round|financing|agreement)\b"),   # all-caps SAFE acronym (not "safe note about X")
+    # revenue/financials — revenue/ARR/MRR are business-confidential in this context.
+    re.compile(r"(?i)\b(?:ARR|MRR)\b"),
+    re.compile(r"(?i)\b(?:monthly\s+recurring\s+revenue|annual\s+recurring\s+revenue|net\s+revenue|gross\s+revenue|revenue\s+(?:was|is|target|projection)|revenue\s+of\s+(?:\$|\d|about|around|roughly)|in\s+revenue|profit\s+(?:was|of|last)|net\s+income|gross\s+margins?\s+(?:are|were)\s+\d|profit\s+margins?\s+(?:are|were)\s+\d)\b"),
+    re.compile(r"(?i)\b(?:cash\s+runway|months?\s+of\s+(?:cash|runway)|monthly\s+burn|we'?re?\s+burning|we\s+burn\s+(?:\$|\d|through)|burn\s+rate\s+(?:of|is)\s+\$?\d)"),
+    # compensation — qualified so "compensate for latency" / saga "compensation" miss.
+    re.compile(r"(?i)\b(?:employee|executive|founder|engineer|hire)\s+(?:salary|salaries|compensation|comp\b)|(?:salary|comp)\s+(?:band|package|range)|equity\s+compensation|base\s+salary\s+of\s+\$?\d|\$\d[\d,]*\s*(?:k|/yr|/year|base)\b"),
+    # M&A / exit — plain words too ("Google approached us about buying the company").
+    re.compile(r"(?i)\b(?:acquisition\s+(?:offer|target|talks)|merger\s+(?:&|and|agreement|with)|merger\s+and\s+acquisition|due\s+diligence\s+(?:on\s+(?:the\s+)?(?:company|acquisition|deal)|process)|(?:acqui\w+|buy\w*|purchas\w+|sell\w*|sold)\s+(?:the\s+|our\s+|us\b)?(?:company|startup|business)|\bexit\s+(?:strategy|valuation)\b|exit\s+the\s+company)\b"),
+    re.compile(r"(?i)\b(?:moat\s+(?:vs|against)|competitive\s+moat|unreleased\s+(?:roadmap|product)|trade\s+secret|under\s+NDA|business[\s-]confidential)\b"),
+    re.compile(r"(?i)\b(?:Stripe\s+Atlas|\bCarta\b|\bPulley\b|Delaware\s+C-?Corp|incorporat\w+\s+default)\b"),
 ]
 
 _IDENTIFIER_PATTERNS = [
@@ -223,21 +247,41 @@ def classify(
 
     # Stage 2 — survived the floor; ask the judge whether it's truly general.
     if judge is None:
-        # No judge available → safe default is project (never auto-global without judgment).
+        # No judge available → project scope (never auto-global without judgment),
+        # and FAIL SAFE on visibility: with no model to vet for confidentiality and
+        # a regex floor that misses paraphrased financials/strategy, defaulting to
+        # shareable would commit (and could pool) unvetted content. Over-classifying
+        # to private (stays in .local, never committed) is the cheap error; leaking a
+        # cap table is not. The user gets committable craft once a model is configured.
         return Classification(scope=Scope.PROJECT.value, category=learning.category,
-                              reasons=["no-judge-default-project"])
+                              reasons=["no-judge-fail-safe-private"],
+                              visibility=Visibility.PRIVATE.value)
 
     verdict = judge(learning, context=context or {})
     scope = verdict.get("scope", Scope.PROJECT.value)
     category = verdict.get("category", learning.category)
+    judged_vis = verdict.get("visibility")
 
-    # The LLM is the second line of defense for confidential content the regex floor
-    # can't pattern-match (e.g. paraphrased strategy). If it flags private, force
-    # private + bar global — confidential never reaches the pool, by either path.
-    if verdict.get("visibility") == Visibility.PRIVATE.value:
+    # The LLM flagged private → force private + bar global (second line of defense
+    # for paraphrased confidential content the regex floor can't pattern-match).
+    if judged_vis == Visibility.PRIVATE.value:
         keep = Scope.PERSONAL.value if scope == Scope.PERSONAL.value else Scope.PROJECT.value
         return Classification(scope=keep, category=category,
                               reasons=[verdict.get("rationale", "llm-private")],
+                              visibility=Visibility.PRIVATE.value)
+
+    # FAIL SAFE: a verdict that keeps the learning LOCAL (project/personal) but does
+    # NOT explicitly judge it shareable is treated as unvetted → private. This is the
+    # NullLLM / abstaining-judge path: with no real confidentiality judgment and a
+    # regex floor that misses paraphrased financials, defaulting to shareable would
+    # commit unvetted content. A judge asserting global IS an explicit shareability
+    # judgment (global is impossible while private), so it is exempt and proceeds to
+    # the global path below. Over-classify-to-private is cheap; leaking is not.
+    if scope != Scope.GLOBAL.value and judged_vis != Visibility.SHAREABLE.value:
+        return Classification(scope=(Scope.PERSONAL.value if scope == Scope.PERSONAL.value
+                                     else Scope.PROJECT.value),
+                              category=category,
+                              reasons=["unvetted-visibility-fail-safe-private"],
                               visibility=Visibility.PRIVATE.value)
 
     if scope == Scope.GLOBAL.value:

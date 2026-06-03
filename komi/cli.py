@@ -578,6 +578,35 @@ def cmd_forget(args) -> int:
     return 0
 
 
+def cmd_reclassify(args) -> int:
+    """Re-scan existing learnings and move any now-confidential ones to private
+    (.local) storage. Useful after upgrading: memory distilled before the visibility
+    feature stays in the committable file until you run this."""
+    from komi.engine.store import Store
+    paths = _host_paths(getattr(args, "host", "claude-code"))
+    moved = []
+    # personal root + (if in a project) the project root
+    roots = [paths.personal_root()]
+    proot = getattr(paths, "project_root", lambda c: None)(getattr(args, "cwd", "") or "")
+    if proot is not None:
+        roots.append(proot)
+    for root in roots:
+        try:
+            s = Store(root, index_path=paths.index_path())
+            moved += s.reclassify_visibility()
+            s.close()
+        except Exception as e:
+            _p(f"  ! could not scan {root}: {e}")
+    if not moved:
+        _p(f"{PRODUCT}: scanned — nothing newly confidential. Your shareable memory is clean.")
+        return 0
+    _p(f"{PRODUCT}: moved {len(moved)} learning(s) to private (.local — gitignored):")
+    for l in moved:
+        _p(f"    - {l.title}  ({l.scope}, id {l.id[:16]}…)")
+    _p("  These are now out of the committable files. Review them in MEMORY.local.md / skills.local/.")
+    return 0
+
+
 def cmd_uninstall(args) -> int:
     if getattr(args, "host", "claude-code") == "codex":
         from komi.adapters.codex import setup as codex_setup
@@ -675,6 +704,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="permanently delete (default: archive, recoverable)")
     pf.add_argument("--host", choices=["claude-code", "codex"], default="claude-code")
     pf.set_defaults(func=cmd_forget)
+
+    prc = sub.add_parser("reclassify",
+                         help="re-scan memory; move newly-confidential learnings to private (.local)")
+    prc.add_argument("--host", choices=["claude-code", "codex"], default="claude-code")
+    prc.set_defaults(func=cmd_reclassify)
 
     pu = sub.add_parser("uninstall", help="remove komi-learn hooks (keeps data)")
     pu.add_argument("--host", choices=["claude-code", "codex"], default="claude-code",

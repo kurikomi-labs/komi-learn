@@ -61,31 +61,34 @@ class Store:
     # The gitignore that makes a komi root safe to version-control. The shareable
     # files are deliberately NOT ignored — committing them is the whole point of
     # project scope (a clone/teammate inherits the craft knowledge).
-    _GITIGNORE = """# komi-learn — keep private + derived data out of version control.
-# Shareable project memory (MEMORY.md, USER.md, skills/) IS meant to be committed.
-
-# Private / confidential learnings (cap tables, strategy, etc.) — local only:
-*.local.md
-skills.local/
-
-# Derived cache + machine/runtime state — never useful in git:
-index.db
-index.db-shm
-index.db-wal
-state.json
-state.lock
-
-# Signing key + secrets — must never be committed:
-keys/
-.env
-"""
+    # Patterns that MUST be ignored for a komi root to be safe to commit. `**/*.local.md`
+    # is recursive (a nested private file can't escape `*.local.md`'s non-recursive
+    # match). Shareable files (MEMORY.md/USER.md/skills/) are deliberately absent.
+    _GITIGNORE_REQUIRED = [
+        "*.local.md", "**/*.local.md", "skills.local/",
+        "index.db", "index.db-shm", "index.db-wal",
+        "state.json", "state.lock", "keys/", ".env",
+    ]
+    _GITIGNORE_HEADER = (
+        "# komi-learn (managed) — private + derived data, never commit.\n"
+        "# Shareable project memory (MEMORY.md, USER.md, skills/) IS meant to be committed.\n"
+    )
 
     def _ensure_gitignore(self) -> None:
+        """Make the komi root safe to commit. ADDITIVE: appends any required pattern
+        that's missing to an existing .gitignore (preserving the user's own lines),
+        rather than skipping when a .gitignore already exists — so an old root, or one
+        with an unrelated .gitignore, still gets the private/derived patterns added."""
         gi = self.root / ".gitignore"
-        if gi.exists():
-            return                       # don't clobber a user-customized one
         try:
-            gi.write_text(self._GITIGNORE, encoding="utf-8")
+            existing = gi.read_text(encoding="utf-8") if gi.exists() else ""
+            present = {ln.strip() for ln in existing.splitlines()}
+            missing = [p for p in self._GITIGNORE_REQUIRED if p not in present]
+            if not missing:
+                return
+            block = self._GITIGNORE_HEADER + "\n".join(missing) + "\n"
+            sep = "" if (not existing or existing.endswith("\n")) else "\n"
+            gi.write_text(existing + sep + block, encoding="utf-8")
         except Exception:
             pass                         # best-effort; never fail store init on this
 
@@ -99,7 +102,9 @@ keys/
             # Private learnings live in a `.local` sibling (MEMORY.md -> MEMORY.local.md)
             # that install gitignores, so confidential knowledge is never committed —
             # while the shareable file CAN be committed and travels to clones.
-            fname = fname.replace(".md", ".local.md")
+            # Suffix-anchored (not str.replace) so a filename with '.md' elsewhere
+            # can't be mangled.
+            fname = (fname[:-3] + ".local.md") if fname.endswith(".md") else (fname + ".local.md")
         return self.root / fname
 
     def _md_paths_all(self, learning_type: str) -> list[Path]:
@@ -107,6 +112,27 @@ keys/
         everything locally — recall, reindex, all())."""
         return [self._md_path(learning_type, Visibility.SHAREABLE.value),
                 self._md_path(learning_type, Visibility.PRIVATE.value)]
+
+    def _purge_md_entry(self, learning_type: str, learning_id: str,
+                        *, except_visibility: str) -> Optional[dict]:
+        """Remove an entry with ``learning_id`` from the visibility file(s) OTHER than
+        ``except_visibility`` (enforces single-residency on a visibility change).
+        Returns the removed record (for telemetry carry-forward), or None."""
+        removed = None
+        for vis in (Visibility.SHAREABLE.value, Visibility.PRIVATE.value):
+            if vis == except_visibility:
+                continue
+            path = self._md_path(learning_type, vis)
+            entries = self._read_entries(path)
+            kept = [e for e in entries if e.get("id") != learning_id]
+            if len(kept) != len(entries):
+                removed = next(e for e in entries if e.get("id") == learning_id)
+                if kept:
+                    text = ENTRY_DELIMITER.join(self._render_entry(e) for e in kept) + "\n"
+                    self._atomic_write(path, text)
+                elif path.exists():
+                    path.unlink()      # last entry gone → remove the now-empty file
+        return removed
 
     def _read_entries(self, path: Path) -> list[dict]:
         """Each entry is a fenced JSON block between § delimiters. We store the
@@ -181,9 +207,18 @@ keys/
 
         # Route by visibility: private → MEMORY.local.md (gitignored), shareable →
         # MEMORY.md (committable). A given id lives in exactly one of the two files.
+        # If this learning's visibility changed since a prior write (e.g. the LLM
+        # backstop reclassified it private on a second sighting), MOVE it: drop any
+        # stale copy from the OTHER visibility file so a flip can't leave a leaked
+        # copy behind in the committable file. Single-residency by construction.
+        prior = self._purge_md_entry(learning.type, learning.id,
+                                     except_visibility=learning.visibility)
         path = self._md_path(learning.type, learning.visibility)
         entries = self._read_entries(path)
         by_id = {e.get("id"): e for e in entries}
+        # carry forward telemetry from the moved copy, if any
+        if prior and learning.id not in by_id:
+            learning.confidence = max(learning.confidence, prior.get("confidence", 0.3))
 
         if learning.id in by_id:
             existing = by_id[learning.id]
@@ -209,6 +244,25 @@ keys/
                 out.extend(Learning.from_dict(e) for e in self._read_entries(path))
         out.extend(self._read_skills())
         return out
+
+    def reclassify_visibility(self) -> list[Learning]:
+        """Re-run the confidential floor over existing SHAREABLE learnings and move
+        any now-flagged-confidential ones to private (.local). Closes the migration
+        gap: memory distilled before the visibility feature (or before a floor update)
+        stays in the committable file until this is run. Returns the moved learnings.
+        Deterministic (floor only — no LLM); a one-shot upgrade/audit step."""
+        from .classify import safety_floor
+        moved: list[Learning] = []
+        for lng in self.all():
+            if lng.visibility != Visibility.SHAREABLE.value:
+                continue
+            joined = " \n ".join([lng.title or "", lng.body or "", lng.trigger or "",
+                                  " ".join(lng.tags or [])])
+            if safety_floor(joined).confidential:
+                lng.visibility = Visibility.PRIVATE.value
+                self.upsert(lng)          # single-residency moves it out of the committable file
+                moved.append(lng)
+        return moved
 
     # ── skills/ persistence (procedural learnings) ──────────────────────
 
@@ -255,6 +309,14 @@ keys/
             if prior.lifecycle.created_at:
                 learning.lifecycle.created_at = prior.lifecycle.created_at
             learning.lifecycle.pinned = learning.lifecycle.pinned or prior.lifecycle.pinned
+        # single-residency: if this skill's visibility changed, remove the stale dir
+        # from the OTHER visibility tree so a flip can't leave a committable copy.
+        import shutil as _shutil
+        other = (Visibility.SHAREABLE.value if learning.visibility == Visibility.PRIVATE.value
+                 else Visibility.PRIVATE.value)
+        stale = self._skills_dir(other) / learning.id.split(":", 1)[-1][:16]
+        if stale.exists():
+            _shutil.rmtree(stale, ignore_errors=True)
         d = self._skill_dir_for(learning)
         d.mkdir(parents=True, exist_ok=True)
         self._atomic_write(d / "SKILL.md", self._render_skill(learning))
