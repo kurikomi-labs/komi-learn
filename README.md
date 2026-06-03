@@ -40,6 +40,7 @@ komi-learn config      # change any setting (menu, or `config set <key> <val>`)
 komi-learn sync        # pull the latest community learnings
 komi-learn queue       # review/approve/reject what you'd contribute to the pool
 komi-learn forget <x>  # erase learnings matching <x> (archive, or --hard to delete)
+komi-learn reclassify  # re-scan memory; move newly-confidential learnings to private (.local)
 komi-learn uninstall   # remove the hooks (keeps your data; --purge to wipe)
 ```
 

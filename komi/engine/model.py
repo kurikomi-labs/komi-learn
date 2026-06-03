@@ -42,6 +42,20 @@ class Scope(str, Enum):
     GLOBAL = "global"      # generally true; eligible (after review) for the public pool
 
 
+class Visibility(str, Enum):
+    """ORTHOGONAL to scope. Scope = how widely a lesson applies; visibility = who
+    may SEE it. A lesson can be project-scoped yet confidential (a cap table is a
+    'project fact' but must never be committed/shared), or project-scoped and freely
+    shareable (a repo's design-token convention). This axis is the difference between
+    'safe to version-control / share with collaborators' and 'stays on my disk'.
+
+    Default is SHAREABLE (most distilled craft is), but the confidential floor in the
+    classifier forces PRIVATE on financial/equity/fundraising/strategy content, and a
+    PRIVATE learning can never be GLOBAL (never reaches the public pool)."""
+    SHAREABLE = "shareable"   # safe to commit + share with collaborators (and, if global, pool-eligible)
+    PRIVATE = "private"       # confidential — local only, never committed, never pooled
+
+
 class Category(str, Enum):
     TOOLING = "tooling"
     WORKFLOW = "workflow"
@@ -114,6 +128,12 @@ class Learning:
     scope: str = Scope.PERSONAL.value
     confidence: float = 0.3
 
+    # Handling policy, ORTHOGONAL to scope and DELIBERATELY NOT part of content_view/
+    # the id (a private flag is local policy, not content — the same lesson must hash
+    # identically whether or not someone marks it private, just like usage/lifecycle).
+    # Default shareable; the classifier's confidential floor moves things to private.
+    visibility: str = Visibility.SHAREABLE.value
+
     id: str = ""
     schema: str = SCHEMA
     evidence: Evidence = field(default_factory=Evidence)
@@ -148,8 +168,20 @@ class Learning:
             "tags": sorted({t.strip().lower() for t in self.tags if t.strip()}),
         }
 
+    def _normalize_visibility(self) -> None:
+        """Enforce the cross-axis invariant in ONE place every persistence path flows
+        through: a PRIVATE learning can never be GLOBAL (confidential content must
+        never reach the public pool). Demote scope to project — fail safe. This makes
+        'private bars global' a structural property of the object, not an emergent
+        property of the classifier's control flow, so curator umbrellas, pool pulls,
+        and hand-edited files can't mint the impossible global+private state."""
+        if (self.visibility == Visibility.PRIVATE.value
+                and self.scope == Scope.GLOBAL.value):
+            self.scope = Scope.PROJECT.value
+
     def finalize(self) -> "Learning":
         """Compute and assign the content-addressed id. Returns self for chaining."""
+        self._normalize_visibility()
         self.id = compute_id(self.content_view())
         now = _now_iso()
         if not self.lifecycle.created_at:
@@ -191,7 +223,11 @@ class Learning:
         # knows the count (the pull path) sets it explicitly AFTER from_dict from the
         # re-verified signer count. Defaults to 1 here.
         allowed_top = set(cls.__dataclass_fields__) - {"corroboration"}  # type: ignore[attr-defined]
-        return cls(**{k: v for k, v in d.items() if k in allowed_top})
+        obj = cls(**{k: v for k, v in d.items() if k in allowed_top})
+        # Enforce private⇒¬global on load too, so a hand-edited or pool-sourced file
+        # that claims scope=global + visibility=private is normalized, not trusted.
+        obj._normalize_visibility()
+        return obj
 
     def publishable(self) -> dict[str, Any]:
         """The form that may leave the device: content + DAG/signature provenance,

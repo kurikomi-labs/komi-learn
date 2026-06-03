@@ -118,9 +118,13 @@ _JUDGE_SYSTEM = """You decide the SCOPE of a distilled learning for a shared kno
 Given one learning (JSON), decide whether it is GENERALLY TRUE and useful to anyone
 doing this class of work — independent of this user/project/machine — or specific to
 this project. Return ONLY a JSON object:
-{"scope":"global"|"project","category":"<keep or refine>","generalized_title":"<if global>","generalized_body":"<if global, no identifiers>","rationale":"<one clause>"}
+{"scope":"global"|"project","visibility":"shareable"|"private","category":"<keep or refine>","generalized_title":"<if global>","generalized_body":"<if global, no identifiers>","rationale":"<one clause>"}
 Rules: "global" ONLY if it holds for many people and has NO identifiers/names/paths.
-When unsure → "project". A wrong "global" leaks specifics into a public pool."""
+When unsure → "project". A wrong "global" leaks specifics into a public pool.
+"visibility" is SEPARATE from scope: set "private" for CONFIDENTIAL business data
+(equity/cap table/shares/valuation, fundraising/investors, revenue/ARR/MRR/salary,
+internal strategy/competitive positioning/unreleased roadmap, acquisitions);
+otherwise "shareable" (default). A "private" learning is NEVER "global"."""
 
 
 def build_llm():

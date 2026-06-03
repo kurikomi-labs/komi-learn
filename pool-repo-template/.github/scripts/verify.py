@@ -246,6 +246,33 @@ _IDENT = [
     re.compile(r"(?i)\b[a-z0-9-]{1,100}\.onion\b"),
 ]
 
+# Business-CONFIDENTIAL content floor — MUST stay byte-identical to
+# komi/engine/classify.py::_CONFIDENTIAL_PATTERNS (parity test enforces this). A
+# match blocks the learning from the public pool: confidential business data has no
+# place in a shared knowledge pool even if it carries no secret/PII pattern.
+_CONFIDENTIAL = [
+    re.compile(r"(?i)\bcap[\s-]?table\b"),
+    re.compile(r"(?i)\b(?:authorized|unissued|outstanding|founder'?s?|treasury|vested|unvested)\s+shares?\b"),
+    re.compile(r"(?i)\bshares?\s+(?:issued|outstanding|authorized|vested|granted\s+to)\b"),
+    re.compile(r"(?i)\bshares?\s+of\s+(?:common|preferred)\s+stock\b"),
+    re.compile(r"(?i)\b\d[\d,.]*\s*(?:k|m|mm|million|billion)?\s+shares?\s+(?:to\s+the\s+founder|issued|authorized|outstanding|vested|granted|of\s+(?:common|preferred)\b)"),
+    re.compile(r"(?i)\b(?:option\s+pool|stock\s+option\s+(?:plan|grant)|\bRSUs?\b|equity\s+(?:grant|stake|compensation|package)|vesting\s+(?:schedule|cliff)|vesting\s+period\s+for\s+(?:shares|equity|options))\b"),
+    re.compile(r"(?i)\b(?:par\s+value\s+(?:of\s+)?\$|fully[\s-]?diluted|pre[\s-]?money|post[\s-]?money)\b"),
+    re.compile(r"(?i)\b(?:company|business|startup|pre[\s-]?money|post[\s-]?money)\s+valuation\b|\bvaluation\s+(?:of\s+\$|cap\b)"),
+    re.compile(r"(?i)\b\d{1,3}\s?%\s+(?:of\s+the\s+company|equity|stake|ownership|fully[\s-]?diluted)\b"),
+    re.compile(r"(?i)\b(?:owns?|holds?|keeps?|retains?|gets?|receives?)\s+\d{1,3}\s?%\s+(?:of\s+the\s+company|equity|stake|ownership)\b"),
+    re.compile(r"(?i)\bfounder\s+(?:owns?|holds?|keeps?|retains?|gets?)\b"),
+    re.compile(r"(?i)\b(?:fundrais\w+|seed\s+round|series\s+[a-d]\s+(?:round|funding|financing|investment)|term\s+sheet|convertible\s+note\s+(?:at|for|with|of|round)|angel\s+investor|venture\s+capital|cap\s+raise|liquidation\s+preference|friends\s+and\s+family\s+(?:round|raise)|409a)\b"),
+    re.compile(r"\bSAFE\s+(?:note|round|financing|agreement)\b"),
+    re.compile(r"\b(?:ARR|MRR)\b"),   # case-SENSITIVE: the acronyms are uppercase; lowercase `arr` is a variable name
+    re.compile(r"(?i)\b(?:monthly\s+recurring\s+revenue|annual\s+recurring\s+revenue|net\s+revenue|gross\s+revenue|revenue\s+(?:was|is|target|projection)|revenue\s+of\s+(?:\$|\d|about|around|roughly)|in\s+revenue|profit\s+(?:was|of|last)|net\s+income|gross\s+margins?\s+(?:are|were)\s+\d|profit\s+margins?\s+(?:are|were)\s+\d)\b"),
+    re.compile(r"(?i)\b(?:cash\s+runway|months?\s+of\s+(?:cash|runway)|monthly\s+burn|we'?re?\s+burning\s+(?:\$|\d|cash|money)|we\s+burn\s+(?:\$|\d|cash)|burn\s+rate\s+(?:of|is)\s+\$?\d)"),
+    re.compile(r"(?i)\b(?:employee|executive|founder|engineer|hire)\s+(?:salary|salaries|compensation|comp\b)|(?:salary|comp)\s+(?:band|package|range)|equity\s+compensation|base\s+salary\s+of\s+\$?\d|\$\d[\d,]*\s*(?:k|/yr|/year|base)\b"),
+    re.compile(r"(?i)\b(?:acquisition\s+(?:offer|target|talks)|merger\s+(?:&|and|agreement|with)|merger\s+and\s+acquisition|due\s+diligence\s+(?:on\s+(?:the\s+)?(?:company|acquisition|deal)|process)|(?:acqui\w+|buy\w*|purchas\w+|sell\w*|sold)\s+(?:the\s+|our\s+|us\b)?(?:company|startup|business)|\bexit\s+(?:strategy|valuation)\b|exit\s+the\s+company)\b"),
+    re.compile(r"(?i)\b(?:moat\s+(?:vs|against)|competitive\s+moat|unreleased\s+(?:roadmap|product)|trade\s+secret|under\s+NDA|business[\s-]confidential)\b"),
+    re.compile(r"(?i)\b(?:Stripe\s+Atlas|\bCarta\b|\bPulley\b|Delaware\s+C-?Corp|incorporation\s+defaults?)\b"),
+]
+
 
 def scrub_problems(text: str) -> list[str]:
     if text and len(text) > 20000:
@@ -257,6 +284,8 @@ def scrub_problems(text: str) -> list[str]:
         out.append("pii")
     if any(p.search(text) for p in _IDENT):
         out.append("machine-identifier")
+    if any(p.search(text) for p in _CONFIDENTIAL):
+        out.append("business-confidential")
     return out
 
 
