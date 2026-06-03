@@ -59,6 +59,34 @@ def update_state(mutator):
     return _update_state_for(state_path(), mutator)
 
 
+def read_state() -> dict:
+    """Read state.json under the shared lock WITHOUT writing it back (parity with
+    claude_code.paths.read_state). Used by hooklib's compaction dedup check."""
+    import json
+    from ..claude_code.paths import _lock_file, _unlock_file
+    sp = state_path()
+    if not sp.exists():
+        return {}
+    lock = sp.with_suffix(".lock")
+    fh = None
+    try:
+        fh = open(lock, "a+")
+        _lock_file(fh)
+        try:
+            data = json.loads(sp.read_text(encoding="utf-8")) or {}
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, OSError):
+            return {}
+    except Exception:
+        return {}
+    finally:
+        if fh is not None:
+            try:
+                _unlock_file(fh)
+            finally:
+                fh.close()
+
+
 def pool_config() -> Optional[dict]:
     try:
         from . import config as cfg_mod

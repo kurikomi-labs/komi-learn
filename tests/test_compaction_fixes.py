@@ -16,6 +16,7 @@ from unittest import mock
 import pytest
 
 from komi.adapters.claude_code import hook_recall as hr
+from komi.adapters import hooklib
 
 
 _BLOCK = "<komi-recall>SAMPLE</komi-recall>"
@@ -42,8 +43,8 @@ def test_default_event_wins_when_payload_omits_event_name():
 
 def test_payload_event_name_overrides_default():
     """An explicit hook_event_name in the payload still takes precedence."""
-    ev, src = hr._classify_event({"hook_event_name": "SessionStart", "source": "startup"},
-                                 default_event="PostCompact")
+    ev, src = hooklib.classify_event({"hook_event_name": "SessionStart", "source": "startup"},
+                                     default_event="PostCompact")
     assert ev == "SessionStart"
 
 
@@ -100,17 +101,19 @@ def test_session_start_builds_block_with_fresh_true(monkeypatch):
 
 
 def test_merged_store_fresh_false_skips_reindex(monkeypatch, tmp_path):
-    """_merged_store(fresh=False) must not reindex the project or mirror the pool."""
+    """build_recall_block(fresh=False) must NOT re-mirror the pool (the compaction
+    perf path now lives in hooklib; the Claude Code shim threads fresh through)."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     from komi.adapters.claude_code import paths
     importlib.reload(paths)
-    importlib.reload(hr)
     mirrored = {"called": False}
-    monkeypatch.setattr(hr, "_mirror_pool_into_index",
-                        lambda store: mirrored.__setitem__("called", True))
-    store = hr._merged_store(str(tmp_path), fresh=False)
+    monkeypatch.setattr(hooklib, "_mirror_pool",
+                        lambda pm, store: mirrored.__setitem__("called", True))
+    hooklib.build_recall_block(paths, cwd=str(tmp_path), fresh=False)
     assert mirrored["called"] is False       # no pool re-mirror on compaction
-    store.close()
+    # and fresh=True DOES mirror
+    hooklib.build_recall_block(paths, cwd=str(tmp_path), fresh=True)
+    assert mirrored["called"] is True
 
 
 # ── dedup guard + breadcrumb ──────────────────────────────────────────────────
@@ -169,14 +172,14 @@ def test_full_flow_second_sibling_event_noops(isolated_state):
 # ── bounded stdin ─────────────────────────────────────────────────────────────
 
 def test_oversized_stdin_is_safe(monkeypatch):
-    huge = "x" * (hr._MAX_STDIN_BYTES + 100)
-    monkeypatch.setattr(hr.sys, "stdin", io.StringIO(huge))
-    assert hr._read_stdin_json() == {}          # over cap → safe empty dict
+    huge = "x" * (hooklib._MAX_STDIN_BYTES + 100)
+    monkeypatch.setattr(hooklib.sys, "stdin", io.StringIO(huge))
+    assert hooklib.read_stdin_json() == {}          # over cap → safe empty dict
 
 
 def test_normal_stdin_parses(monkeypatch):
-    monkeypatch.setattr(hr.sys, "stdin", io.StringIO('{"hook_event_name":"SessionStart"}'))
-    assert hr._read_stdin_json()["hook_event_name"] == "SessionStart"
+    monkeypatch.setattr(hooklib.sys, "stdin", io.StringIO('{"hook_event_name":"SessionStart"}'))
+    assert hooklib.read_stdin_json()["hook_event_name"] == "SessionStart"
 
 
 # ── installer matches by command shape, not loose substring ───────────────────
@@ -326,14 +329,14 @@ def test_emit_suppressed_on_postcompact():
     context — a diagnostic JSON blob would be noise)."""
     out = io.StringIO()
     with mock.patch("sys.stdout", out):
-        hr._emit({}, note="diagnostic", event="PostCompact")
+        hooklib.emit({}, note="diagnostic", event="PostCompact")
     assert out.getvalue() == ""
 
 
 def test_emit_writes_json_on_sessionstart():
     out = io.StringIO()
     with mock.patch("sys.stdout", out):
-        hr._emit({}, note="why", event="SessionStart")
+        hooklib.emit({}, note="why", event="SessionStart")
     obj = json.loads(out.getvalue())
     assert obj["_note"] == "why"
 
@@ -344,7 +347,7 @@ def test_emit_swallows_broken_pipe():
         def write(self, *a): raise BrokenPipeError("closed")
         def flush(self): raise BrokenPipeError("closed")
     with mock.patch("sys.stdout", _Boom()):
-        hr._emit({}, event="SessionStart")   # must not raise
+        hooklib.emit({}, event="SessionStart")   # must not raise
 
 
 def test_dedup_path_postcompact_emits_nothing(isolated_state):
@@ -368,7 +371,7 @@ def test_hook_capture_bounds_stdin(monkeypatch, tmp_path):
     from komi.adapters.claude_code import paths, hook_capture
     importlib.reload(paths)
     importlib.reload(hook_capture)
-    huge = "x" * (hr._MAX_STDIN_BYTES + 100)
+    huge = "x" * (hooklib._MAX_STDIN_BYTES + 100)
     monkeypatch.setattr(hook_capture.sys, "stdin", io.StringIO(huge))
     # capture records the (empty, over-cap) payload and delegates without exploding
     with mock.patch("sys.stdout", io.StringIO()):
