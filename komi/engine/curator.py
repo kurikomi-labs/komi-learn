@@ -447,19 +447,31 @@ def corpus_health(learnings: list[Learning]) -> dict:
     n = len(active)
     if n == 0:
         return {"active": 0, "stale_unused": 0, "stale_share": 0.0,
-                "never_reused": 0, "avg_confidence": 0.0}
+                "never_reused": 0, "surfaced_never_used": 0,
+                "surfaced_never_used_share": 0.0, "avg_confidence": 0.0}
     stale_unused = sum(
         1 for l in active
         if l.usage.reused == 0 and _age_days(l) > DEFAULT_STALE_DAYS
         and (l.confidence or 0) < 0.6
     )
     never_reused = sum(1 for l in active if l.usage.reused == 0)
+    # The sharpest "is this corpus useful?" signal, now that recalled is live:
+    # learnings recall actually SURFACED into context (recalled>0) yet were never
+    # acted on (reused==0). A high share is the fingerprint of low-signal memory —
+    # noise that keeps matching queries but never helps. (Learnings never surfaced
+    # at all are excluded: that's a recall/ranking gap, not proven-useless content.)
+    surfaced = [l for l in active if (l.usage.recalled or 0) > 0]
+    surfaced_never_used = sum(1 for l in surfaced if l.usage.reused == 0)
     avg_conf = sum((l.confidence or 0) for l in active) / n
     return {
         "active": n,
         "stale_unused": stale_unused,
         "stale_share": round(stale_unused / n, 2),
         "never_reused": never_reused,
+        "surfaced_never_used": surfaced_never_used,
+        "surfaced_never_used_share": (
+            round(surfaced_never_used / len(surfaced), 2) if surfaced else 0.0
+        ),
         "avg_confidence": round(avg_conf, 2),
     }
 
