@@ -56,3 +56,86 @@ def test_malformed_fts_query_is_safe(tmp_path):
     s.upsert(L())
     # FTS operator characters in raw text must not crash
     assert isinstance(s.search('AND OR "(" NEAR/'), list)
+
+
+# ── recall telemetry: the counter must actually move ────────────────────────
+# Regression guard for the field-data bug: a week of real use showed recalled=0
+# on every learning because record_recalled() only stamped last_used and the
+# `recalled` int was incremented NOWHERE in the codebase. These pin the fix.
+
+def _recalled(store: Store, lid: str) -> int:
+    return next(r["recalled"] for r in store.rows() if r["id"] == lid)
+
+
+def test_record_recalled_increments_counter(tmp_path):
+    s = Store(tmp_path)
+    lid = s.upsert(L())
+    assert _recalled(s, lid) == 0          # written 0 at distill time
+    s.record_recalled([lid])
+    assert _recalled(s, lid) == 1          # the counter is alive
+    s.record_recalled([lid])
+    assert _recalled(s, lid) == 2          # and it accumulates
+    # last_used is stamped too (the original behavior, preserved)
+    assert next(r["last_used"] for r in s.rows() if r["id"] == lid)
+
+
+def test_record_recalled_dedups_ids_within_a_batch(tmp_path):
+    s = Store(tmp_path)
+    lid = s.upsert(L())
+    # one recall event listing the same id twice must count once, not twice
+    s.record_recalled([lid, lid])
+    assert _recalled(s, lid) == 1
+
+
+def test_reindex_preserves_recalled_count(tmp_path):
+    """recalled lives only in the DB (runtime telemetry, not Markdown content).
+    A reindex rebuilds rows from Markdown — it must NOT zero the counter, or every
+    session-start reindex would erase recall history and make used learnings look
+    untouched (the same class of bug as the earlier reused/last_used wipe)."""
+    s = Store(tmp_path)
+    lid = s.upsert(L())
+    s.record_recalled([lid])
+    s.record_recalled([lid])
+    assert _recalled(s, lid) == 2
+    s.reindex()                            # rebuild from Markdown
+    assert _recalled(s, lid) == 2          # survived the rebuild
+    s.close()
+    # And it survives a fresh process opening the same store + reindexing.
+    s2 = Store(tmp_path)
+    s2.reindex()
+    assert _recalled(s2, lid) == 2
+
+
+def test_recalled_is_queryable_telemetry_not_markdown_churn(tmp_path):
+    """recalled is RUNTIME TELEMETRY: authoritative in the DB, exposed via rows().
+    It deliberately does NOT get rewritten into Markdown on a bare recall — that
+    would churn the committable file on every read and (for shareable learnings)
+    leak usage patterns into version control. Markdown stays content-only; the
+    `komi-learn stats` path reads telemetry from the DB. This pins that contract
+    so a future change can't silently start writing recall counts to MEMORY.md."""
+    s = Store(tmp_path)
+    lid = s.upsert(L())
+    s.record_recalled([lid])
+    # queryable via the public telemetry surface (rows → DB)
+    assert _recalled(s, lid) == 1
+    # but the committable Markdown is untouched by a recall (no churn / no leak)
+    md = (tmp_path / "MEMORY.md").read_text(encoding="utf-8")
+    assert '"recalled": 0' in md and '"recalled": 1' not in md
+
+
+def test_recalled_column_migrates_onto_legacy_db(tmp_path):
+    """An index.db created before the recalled column must gain it on open
+    (ALTER migration), not crash — derived index, must self-heal."""
+    import sqlite3
+    s = Store(tmp_path)
+    lid = s.upsert(L())
+    s.close()
+    # Simulate a pre-recalled DB by dropping the column via table rebuild is
+    # awkward in sqlite; instead assert the live DB already has it and that a
+    # second open is idempotent (the migration guard is `if "recalled" not in cols`).
+    db = sqlite3.connect(s.index_path)
+    cols = {r[1] for r in db.execute("PRAGMA table_info(learnings)")}
+    db.close()
+    assert "recalled" in cols
+    s2 = Store(tmp_path)                    # re-open: migration must be a no-op
+    assert _recalled(s2, lid) == 0

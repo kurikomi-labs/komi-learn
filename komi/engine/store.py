@@ -225,6 +225,7 @@ class Store:
             learning.confidence = max(learning.confidence, prior.get("confidence", 0.3))
             pu = prior.get("usage", {}) or {}
             learning.usage.reused = max(learning.usage.reused, pu.get("reused", 0) or 0)
+            learning.usage.recalled = max(learning.usage.recalled, pu.get("recalled", 0) or 0)
             learning.usage.last_used = learning.usage.last_used or pu.get("last_used")
             pl = prior.get("lifecycle", {}) or {}
             if pl.get("created_at"):
@@ -481,6 +482,7 @@ class Store:
                 type TEXT, scope TEXT, category TEXT,
                 title TEXT, body TEXT, trigger TEXT, tags TEXT,
                 confidence REAL, reused INTEGER DEFAULT 0,
+                recalled INTEGER DEFAULT 0,
                 last_used TEXT, state TEXT DEFAULT 'active',
                 source TEXT, origin_root TEXT, updated_at TEXT,
                 embedding BLOB, embed_version TEXT,
@@ -516,6 +518,8 @@ class Store:
             db.execute("ALTER TABLE learnings ADD COLUMN embed_version TEXT")
         if "corroboration" not in cols:
             db.execute("ALTER TABLE learnings ADD COLUMN corroboration INTEGER DEFAULT 1")
+        if "recalled" not in cols:
+            db.execute("ALTER TABLE learnings ADD COLUMN recalled INTEGER DEFAULT 0")
         db.commit()
         Store._migrate_row_identity(db)
         return db
@@ -551,6 +555,7 @@ class Store:
                     type TEXT, scope TEXT, category TEXT,
                     title TEXT, body TEXT, trigger TEXT, tags TEXT,
                     confidence REAL, reused INTEGER DEFAULT 0,
+                    recalled INTEGER DEFAULT 0,
                     last_used TEXT, state TEXT DEFAULT 'active',
                     source TEXT, origin_root TEXT, updated_at TEXT,
                     embedding BLOB, embed_version TEXT,
@@ -559,10 +564,10 @@ class Store:
                 );
                 INSERT OR IGNORE INTO learnings
                     (id, type, scope, category, title, body, trigger, tags, confidence,
-                     reused, last_used, state, source, origin_root, updated_at,
+                     reused, recalled, last_used, state, source, origin_root, updated_at,
                      embedding, embed_version, corroboration)
                 SELECT id, type, scope, category, title, body, trigger, tags, confidence,
-                     reused, last_used, state, source, origin_root, updated_at,
+                     reused, recalled, last_used, state, source, origin_root, updated_at,
                      embedding, embed_version, corroboration
                 FROM learnings_old;
                 DROP TABLE learnings_old;
@@ -664,11 +669,11 @@ class Store:
         self._db.execute(
             """
             INSERT INTO learnings (id, type, scope, category, title, body, trigger,
-                                   tags, confidence, reused, last_used, state, source,
-                                   origin_root, updated_at, corroboration)
+                                   tags, confidence, reused, recalled, last_used, state,
+                                   source, origin_root, updated_at, corroboration)
             VALUES (:id,:type,:scope,:category,:title,:body,:trigger,:tags,
-                    :confidence,:reused,:last_used,:state,:source,:origin_root,:updated_at,
-                    :corroboration)
+                    :confidence,:reused,:recalled,:last_used,:state,:source,:origin_root,
+                    :updated_at,:corroboration)
             ON CONFLICT(id, origin_root) DO UPDATE SET
                 scope=excluded.scope, category=excluded.category, title=excluded.title,
                 body=excluded.body, trigger=excluded.trigger, tags=excluded.tags,
@@ -681,6 +686,7 @@ class Store:
                 "category": lng.category, "title": lng.title, "body": lng.body,
                 "trigger": lng.trigger, "tags": " ".join(lng.tags),
                 "confidence": lng.confidence, "reused": lng.usage.reused,
+                "recalled": lng.usage.recalled,
                 "last_used": lng.usage.last_used, "state": lng.lifecycle.state,
                 "source": source, "origin_root": self._root_key,
                 "updated_at": lng.lifecycle.updated_at,
@@ -705,9 +711,9 @@ class Store:
         learnings look prunable. See the data-loss fix.
         """
         prior = {
-            r["id"]: (r["reused"] or 0, r["last_used"])
+            r["id"]: (r["reused"] or 0, r["last_used"], r["recalled"] or 0)
             for r in self._db.execute(
-                "SELECT id, reused, last_used FROM learnings WHERE origin_root=?",
+                "SELECT id, reused, last_used, recalled FROM learnings WHERE origin_root=?",
                 (self._root_key,),
             )
         }
@@ -726,9 +732,10 @@ class Store:
         reindex never loses it. Keeps the max of file vs prior (corroboration may
         have bumped the file's confidence; usage only ever grows)."""
         if lng.id in prior:
-            reused, last_used = prior[lng.id]
+            reused, last_used, recalled = prior[lng.id]
             lng.usage.reused = max(lng.usage.reused, reused)
             lng.usage.last_used = lng.usage.last_used or last_used
+            lng.usage.recalled = max(lng.usage.recalled, recalled)
 
     def search(self, query: str, *, limit: int = 20,
                scopes: Optional[list[str]] = None) -> list[sqlite3.Row]:
@@ -762,13 +769,22 @@ class Store:
     # backend change later without hunting down private accesses.
 
     def record_recalled(self, ids: list[str], *, when: Optional[str] = None) -> None:
-        """Mark learnings as recalled (last_used) for usage analytics."""
+        """Mark learnings as recalled: bump the per-id recall counter and stamp
+        last_used. Both live in the DB (runtime telemetry, not content) and are
+        carried back into Markdown on the next reindex/upsert so the signal is
+        visible and the curator can rank on it. De-dups ids within a single recall
+        so one surfaced learning counts once per recall event, not once per origin
+        row it happens to have."""
         if not ids:
             return
         ts = when or _now_iso()
+        seen = list(dict.fromkeys(ids))   # preserve order, drop dup ids in this batch
         try:
-            self._db.executemany("UPDATE learnings SET last_used=? WHERE id=?",
-                                 [(ts, i) for i in ids])
+            self._db.executemany(
+                "UPDATE learnings SET recalled = COALESCE(recalled, 0) + 1, last_used=? "
+                "WHERE id=?",
+                [(ts, i) for i in seen],
+            )
             self._db.commit()
         except Exception:
             pass

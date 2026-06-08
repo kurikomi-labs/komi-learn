@@ -8,7 +8,7 @@ import pytest
 
 from komi.engine.store import Store
 from komi.engine.curator import (
-    curate, cluster, is_prunable, render_report,
+    curate, cluster, is_prunable, render_report, corpus_health,
     DEFAULT_STALE_DAYS, DEFAULT_CONFIDENCE_FLOOR,
 )
 from komi.engine.model import Learning, LearningType, Category, Scope
@@ -162,3 +162,41 @@ def test_render_report_is_readable(tmp_path):
     text = render_report(rep)
     assert "Curation Report" in text
     assert "Archived as stale" in text
+
+
+# ── corpus health: the "surfaced but never used" junk signal ────────────────
+# Now that `recalled` is a live counter, corpus_health surfaces the sharpest
+# usefulness metric: learnings recall served into context yet were never acted
+# on. This is the data-grounded answer to "are my learnings actually useful?"
+
+def _used(title, *, recalled, reused):
+    l = P(title)
+    l.usage.recalled = recalled
+    l.usage.reused = reused
+    return l
+
+
+def test_corpus_health_counts_surfaced_never_used():
+    learnings = [
+        _used("junk-1", recalled=5, reused=0),   # surfaced, never used → noise
+        _used("junk-2", recalled=3, reused=0),   # surfaced, never used → noise
+        _used("good",   recalled=4, reused=2),   # surfaced AND used → keeper
+        _used("unseen", recalled=0, reused=0),   # never surfaced → not counted
+    ]
+    h = corpus_health(learnings)
+    # 3 of 4 active were surfaced; 2 of those 3 were never used
+    assert h["surfaced_never_used"] == 2
+    assert h["surfaced_never_used_share"] == round(2 / 3, 2)
+
+
+def test_corpus_health_no_surfaced_is_zero_not_crash():
+    # nothing recalled yet (fresh corpus / recall not firing) → divide-by-zero guard
+    h = corpus_health([_used("x", recalled=0, reused=0)])
+    assert h["surfaced_never_used"] == 0
+    assert h["surfaced_never_used_share"] == 0.0
+
+
+def test_corpus_health_empty():
+    h = corpus_health([])
+    assert h["surfaced_never_used"] == 0
+    assert h["surfaced_never_used_share"] == 0.0
