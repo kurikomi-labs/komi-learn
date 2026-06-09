@@ -21,6 +21,7 @@ cache holds. We do not mutate context mid-turn.
 from __future__ import annotations
 
 import math
+import re as _re
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -87,6 +88,51 @@ def _col(row, key, default=0):
     except (KeyError, IndexError):
         return default
     return default if val is None else val
+
+
+# Generic path ancestors that carry no project signal — dropped from the cwd query so
+# they don't dilute FTS/semantic matching against the real project + subsystem terms.
+# (Deliberately NOT dropping 'github'/'git': they're often part of a real project name
+# like 'github-store'. The tail-bias below handles usernames/home dirs that slip through.)
+_PATH_NOISE = {
+    "users", "user", "home", "documents", "desktop", "downloads", "development",
+    "dev", "projects", "project", "code", "src", "repos", "repo", "workspace",
+    "work", "var", "tmp", "temp", "opt", "usr", "mnt", "library", "appdata",
+}
+
+
+def _path_terms(cwd: str, *, keep: int = 6) -> list[str]:
+    """Tokenize a working-directory path into recall-useful project terms.
+
+    A raw path is a poor query (separators + generic ancestors). We split on path, word,
+    and drive boundaries (so 'C:/.../GitHub-Store' → 'github store'; 'githubStore' →
+    'github store'), drop generic ancestor dirs and 1-char/pure-digit noise, and keep the
+    distinctive TAIL (project + subsystem) — biasing to the tail also drops the username /
+    home-dir segments near the path root. Order-preserving + deduped. Returns [] for
+    empty/garbage input so the caller falls back cleanly."""
+    if not cwd:
+        return []
+    # split on path separators AND the Windows drive colon, so 'C:' never leaks.
+    raw_segs = [s for s in _re.split(r"[\\/:]+", cwd) if s]
+    # Drop the home-dir username: the segment immediately after users/home/Users is a
+    # personal identifier, never a project term (e.g. /Users/<name>/..., C:/Users/<name>/...).
+    drop_idx = set()
+    for i, s in enumerate(raw_segs[:-1]):
+        if s.lower() in ("users", "home") and (i + 1) < len(raw_segs):
+            drop_idx.add(i + 1)
+    raw_segs = [s for i, s in enumerate(raw_segs) if i not in drop_idx]
+    terms: list[str] = []
+    for seg in raw_segs:
+        # split CamelCase, kebab, snake, dots → words
+        for w in _re.split(r"[-_.\s]+|(?<=[a-z0-9])(?=[A-Z])", seg):
+            wl = w.strip().lower()
+            if not wl or wl in _PATH_NOISE or wl.isdigit() or len(wl) <= 1:
+                continue
+            if wl not in terms:
+                terms.append(wl)
+    # Bias toward the tail (closest to the project) when there are many segments — this
+    # is also what discards the username/home-dir noise that sits near the path root.
+    return terms[-keep:] if len(terms) > keep else terms
 
 
 def _is_confidential(row) -> bool:
@@ -200,8 +246,15 @@ def recall(
     identity = identity_all[:cfg.max_identity]
 
     # Build the search query from everything we know about the current context.
+    # The cwd is tokenized into meaningful project terms — a raw path like
+    # ".../Documents/development/GitHub-Store/feature/i18n" is a poor FTS/semantic query
+    # (separators + generic ancestors like Users/Documents dilute the real signal). We
+    # keep the distinctive tail segments (the project + subsystem) so similarity ranks
+    # against "github store i18n", not a filesystem string. (A real user prompt would be
+    # an even better query, but it isn't available at SessionStart — the hook fires before
+    # the first prompt; feeding it would need a UserPromptSubmit hook-contract change.)
     query = " ".join(filter(None, [
-        cwd, " ".join(recent_files or []), prompt_hint,
+        " ".join(_path_terms(cwd)), " ".join(recent_files or []), prompt_hint,
     ])) or " ".join(r["title"] for r in rows[:10])  # cold start: use what we have
 
     scopes = None if cfg.include_global else [Scope.PERSONAL.value, Scope.PROJECT.value]
@@ -291,8 +344,6 @@ def _mark_recalled(store: Store, ids: list[str]) -> None:
     (Reuse — the stronger signal — is credited separately when a learning is acted on.)"""
     store.record_recalled(ids)
 
-
-import re as _re
 
 # Anything that could let untrusted recalled content escape the data fence or
 # impersonate a system/role marker. Recalled learnings come from the PUBLIC pool,
