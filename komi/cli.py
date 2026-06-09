@@ -619,6 +619,68 @@ def cmd_reclassify(args) -> int:
     return 0
 
 
+def cmd_show(args) -> int:
+    """Show what komi-learn recalled, and let you grade it.
+
+    The field data showed the system was blind to its own usefulness. The user's own
+    thumbs is the cheapest CORRECT reuse signal — so `show` lists what recall actually
+    surfaced (recalled>0), and `show up/down <id>` records your verdict: up credits reuse
+    + bumps confidence; down lowers confidence (and archives if it falls through the floor)."""
+    from komi.engine.store import Store
+    paths = _host_paths(getattr(args, "host", "claude-code"))
+    store = Store(paths.personal_root(), index_path=paths.index_path())
+    action = getattr(args, "show_action", None) or "list"
+
+    if action == "list":
+        learns = [l for l in store.all_with_telemetry()
+                  if l.lifecycle.state == "active" and (l.usage.recalled or 0) > 0]
+        if not learns:
+            _p(f"{PRODUCT}: nothing recalled yet. As you work, komi surfaces learnings here.")
+            _p("  (If you expected items, recall may not be firing — try `komi-learn doctor`.)")
+            return 0
+        # most-recently-surfaced first; the ones fresh in your mind are easiest to grade
+        learns.sort(key=lambda l: (l.usage.last_used or "", l.usage.recalled or 0), reverse=True)
+        _p(f"{PRODUCT}: {len(learns)} learning(s) recall has surfaced "
+           f"(grade with `show up <id>` / `show down <id>`):\n")
+        for l in learns[:30]:
+            used = f"recalled {l.usage.recalled}× · reused {l.usage.reused}×"
+            _p(f"  [{l.id[:12]}]  {l.title}")
+            _p(f"               {used} · conf {round(l.confidence or 0, 2)} · {l.scope}")
+        return 0
+
+    # up / down both take an id (prefix-matched, like forget)
+    raw = (getattr(args, "id", "") or "").strip()
+    if not raw:
+        _p(f"  usage: komi-learn show {action} <id>   (id from `komi-learn show`)")
+        return 1
+    matches = [l for l in store.all_with_telemetry()
+               if l.lifecycle.state == "active" and l.id.replace("blake2b:", "").startswith(
+                   raw.replace("blake2b:", ""))]
+    if not matches:
+        _p(f"  no active learning with id starting {raw!r}. Run `komi-learn show` for ids.")
+        return 1
+    if len(matches) > 1:
+        _p(f"  {raw!r} is ambiguous ({len(matches)} matches) — use a longer id prefix:")
+        for l in matches[:8]:
+            _p(f"    [{l.id[:16]}]  {l.title}")
+        return 1
+
+    lng = matches[0]
+    if action == "up":
+        store.record_reused([lng.id])                       # user confirms it helped
+        new = store.adjust_confidence(lng.id, +0.1)
+        _p(f"  [up] '{lng.title}' — credited reuse, confidence -> {round(new or 0, 2)}.")
+        return 0
+    # down
+    new = store.adjust_confidence(lng.id, -0.2)
+    if new is not None and new <= 0.1:
+        store.archive(lng.id)
+        _p(f"  [down] '{lng.title}' — confidence floored ({round(new, 2)}); archived (recoverable).")
+    else:
+        _p(f"  [down] '{lng.title}' — confidence -> {round(new or 0, 2)}. It'll surface less.")
+    return 0
+
+
 def cmd_uninstall(args) -> int:
     if getattr(args, "host", "claude-code") == "codex":
         from komi.adapters.codex import setup as codex_setup
@@ -721,6 +783,16 @@ def build_parser() -> argparse.ArgumentParser:
                          help="re-scan memory; move newly-confidential learnings to private (.local)")
     prc.add_argument("--host", choices=["claude-code", "codex"], default="claude-code")
     prc.set_defaults(func=cmd_reclassify)
+
+    psh = sub.add_parser("show", help="see what komi recalled, and grade it (up/down)")
+    psh.add_argument("--host", choices=["claude-code", "codex"], default="claude-code")
+    shsub = psh.add_subparsers(dest="show_action")
+    shsub.add_parser("list", help="list learnings recall has surfaced (default)")
+    shup = shsub.add_parser("up", help="this learning helped — credit reuse + raise confidence")
+    shup.add_argument("id", help="id (prefix) from `komi-learn show`")
+    shdn = shsub.add_parser("down", help="this learning is noise — lower confidence / archive")
+    shdn.add_argument("id", help="id (prefix) from `komi-learn show`")
+    psh.set_defaults(func=cmd_show)
 
     pu = sub.add_parser("uninstall", help="remove komi-learn hooks (keeps data)")
     pu.add_argument("--host", choices=["claude-code", "codex"], default="claude-code",
