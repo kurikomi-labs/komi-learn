@@ -1,0 +1,4 @@
+# Fetched dataset (download with `python -m benchmarks.locomo.dataset --fetch`) and
+# run artifacts are not committed — the harness fetches/generates them on demand.
+data/
+results/
