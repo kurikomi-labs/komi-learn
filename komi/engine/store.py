@@ -417,6 +417,40 @@ class Store:
                 return lng
         return None
 
+    def adjust_confidence(self, learning_id: str, delta: float) -> Optional[float]:
+        """Nudge a learning's confidence by ``delta`` (clamped to [0.05, 0.99]) in BOTH
+        Markdown and the index. Used by the user-feedback loop (`show up/down`): a thumbs
+        signal is the cheapest correct judgment of usefulness. Returns the new confidence,
+        or None if the id isn't found. Refreshes updated_at so recency reflects the touch."""
+        for t in _FILE_FOR_TYPE:
+            for path in self._md_paths_all(t):
+                entries = self._read_entries(path)
+                for e in entries:
+                    if e.get("id") == learning_id:
+                        new = max(0.05, min(0.99, (e.get("confidence") or 0.3) + delta))
+                        e["confidence"] = new
+                        e.setdefault("lifecycle", {})["updated_at"] = _now_iso()
+                        text = ENTRY_DELIMITER.join(self._render_entry(x) for x in entries) + "\n"
+                        self._atomic_write(path, text)
+                        self._db.execute(
+                            "UPDATE learnings SET confidence=?, updated_at=? WHERE id=?",
+                            (new, _now_iso(), learning_id))
+                        self._db.commit()
+                        return new
+        # skills: same nudge in the SKILL.md record
+        for skill_md in self._all_skill_files():
+            rec = _extract_json_block(skill_md.read_text(encoding="utf-8", errors="replace"))
+            if rec and rec.get("id") == learning_id:
+                lng = Learning.from_dict(rec)
+                lng.confidence = max(0.05, min(0.99, (lng.confidence or 0.3) + delta))
+                lng.lifecycle.updated_at = _now_iso()
+                self._atomic_write(skill_md, self._render_skill(lng))
+                self._db.execute("UPDATE learnings SET confidence=?, updated_at=? WHERE id=?",
+                                 (lng.confidence, _now_iso(), learning_id))
+                self._db.commit()
+                return lng.confidence
+        return None
+
     def archive(self, learning_id: str) -> bool:
         """Archive (never delete) — the maximum destructive action, per Hermes."""
         for t in _FILE_FOR_TYPE:
