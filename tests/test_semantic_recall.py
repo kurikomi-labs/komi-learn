@@ -120,3 +120,42 @@ def test_candidate_hits_keyword_path(tmp_path, no_embedder):
     s.upsert(L("git bisect regression", tags=["git"]))
     cands = _candidate_hits(s, "git bisect", limit=5, scopes=None)
     assert cands and 0.0 < cands[0][1] <= 1.0           # bm25 squashed into (0,1]
+
+
+# ── cwd → project terms: recall stops ranking against a raw path string ──────
+# Field-data finding: at SessionStart there's no user prompt, so the query was just the
+# bare cwd path (separators + generic ancestors). Tokenizing it into project/subsystem
+# terms gives similarity something real to match. (No hook-contract change — a real
+# prompt would be better but isn't available before the first turn.)
+
+from komi.engine.recall import _path_terms
+
+
+def test_path_terms_extracts_project_subsystem():
+    t = _path_terms("/home/alice/projects/GitHub-Store/feature/i18n")
+    assert "store" in t and "i18n" in t                  # project + subsystem kept
+    assert "projects" not in t and "home" not in t       # generic ancestors dropped
+    assert "alice" not in t                              # home-dir username dropped
+
+
+def test_path_terms_handles_windows_drive_and_camelcase():
+    t = _path_terms(r"C:\Users\bob\code\MyApp\Src")
+    assert "c" not in t                                  # drive colon never leaks
+    assert "bob" not in t                                # username dropped
+    assert "my" in t and "app" in t                      # CamelCase → words
+
+
+def test_path_terms_empty_and_root_are_safe():
+    assert _path_terms("") == []
+    assert _path_terms("/") == []
+
+
+def test_recall_uses_cwd_project_terms_as_query(tmp_path, no_embedder):
+    """With no prompt_hint, recall should still surface a learning matching the project
+    in the cwd — proving the path is tokenized into a usable query, not a dead string."""
+    s = Store(tmp_path)
+    s.upsert(L("i18n russian plurals", body="russian has 3-form plurals", tags=["i18n"]))
+    s.upsert(L("docker layer caching", body="order dockerfile by change freq", tags=["docker"]))
+    block = recall(s, cwd="/home/u/projects/GitHub-Store/feature/i18n",
+                   config=RecallConfig(k=1))
+    assert "russian" in block.lower() or "i18n" in block.lower()   # matched via cwd terms
