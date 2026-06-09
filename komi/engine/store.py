@@ -239,6 +239,15 @@ class Store:
                 1.0, max(existing.get("confidence", 0.3), learning.confidence) + 0.1
             )
             existing.setdefault("lifecycle", {})["updated_at"] = _now_iso()
+            # REUSE-CREDIT (observable, conservative): the agent independently re-derived
+            # a lesson it already holds. If that lesson was ever SURFACED by recall
+            # (recalled>0), this re-derivation is evidence it proved useful → credit reuse.
+            # Gated on prior recall so we don't credit re-deriving something never shown
+            # (that's mere corroboration, not reuse). This is the only place a non-zero
+            # `reused` originates — it's what flips reuse_instrumented true.
+            recalled_n, _ = self.recall_telemetry(learning.id)
+            if recalled_n > 0:
+                self.record_reused([learning.id])
         else:
             by_id[learning.id] = learning.to_dict()
 
@@ -255,6 +264,30 @@ class Store:
             for path in self._md_paths_all(t):    # shareable + private (.local)
                 out.extend(Learning.from_dict(e) for e in self._read_entries(path))
         out.extend(self._read_skills())
+        return out
+
+    def all_with_telemetry(self) -> list[Learning]:
+        """``all()`` but with recall/reuse telemetry overlaid from the DB. Markdown is
+        the content source of truth; usage counters (recalled/reused/last_used) live
+        ONLY in the index (runtime state, not content — never written back to Markdown
+        to avoid churn/leak). Any analytics that reasons about usefulness — corpus_health,
+        the curator's keep-if-used / surfaced_never_used — MUST read through here, or it
+        sees a frozen-0 counter and concludes (wrongly) that nothing is ever used."""
+        tel: dict[str, tuple[int, int, Optional[str]]] = {}
+        try:
+            for r in self._db.execute(
+                "SELECT id, MAX(COALESCE(recalled,0)) AS rc, MAX(COALESCE(reused,0)) AS ru, "
+                "MAX(last_used) AS lu FROM learnings GROUP BY id"
+            ):
+                tel[r["id"]] = (int(r["rc"] or 0), int(r["ru"] or 0), r["lu"])
+        except Exception:
+            tel = {}
+        out = self.all()
+        for lng in out:
+            rc, ru, lu = tel.get(lng.id, (0, 0, None))
+            lng.usage.recalled = max(lng.usage.recalled, rc)
+            lng.usage.reused = max(lng.usage.reused, ru)
+            lng.usage.last_used = lng.usage.last_used or lu
         return out
 
     def reclassify_visibility(self) -> list[Learning]:
@@ -801,6 +834,46 @@ class Store:
             self._db.commit()
         except Exception:
             pass
+
+    def record_reused(self, ids: list[str], *, when: Optional[str] = None) -> int:
+        """Credit reuse — the STRONGER usage signal — for learnings that were acted on.
+        Bumps the per-id reuse counter and refreshes last_used. Like recall telemetry it
+        lives in the DB and is carried back to Markdown on the next reindex/upsert.
+        De-dups ids within a batch. Returns how many distinct ids were credited.
+
+        Reuse is what `surfaced_never_used` and the curator's keep-if-used guard depend
+        on; until something calls this, those read a frozen-0 counter. The distiller
+        calls it when a recalled lesson is independently re-derived (see upsert)."""
+        if not ids:
+            return 0
+        ts = when or _now_iso()
+        seen = list(dict.fromkeys(ids))
+        try:
+            self._db.executemany(
+                "UPDATE learnings SET reused = COALESCE(reused, 0) + 1, last_used=? "
+                "WHERE id=?",
+                [(ts, i) for i in seen],
+            )
+            self._db.commit()
+            return len(seen)
+        except Exception:
+            return 0
+
+    def recall_telemetry(self, learning_id: str) -> tuple[int, int]:
+        """(recalled, reused) counters for an id from the DB (max across origin rows).
+        Lets the distiller decide whether a re-derived lesson was ever SURFACED before
+        crediting reuse — re-deriving a lesson the user was never shown isn't 'reuse'."""
+        try:
+            row = self._db.execute(
+                "SELECT MAX(COALESCE(recalled,0)) AS r, MAX(COALESCE(reused,0)) AS u "
+                "FROM learnings WHERE id=?",
+                (learning_id,),
+            ).fetchone()
+            if row is None:
+                return (0, 0)
+            return (int(row["r"] or 0), int(row["u"] or 0))
+        except Exception:
+            return (0, 0)
 
     def embeddings_by_id(self) -> dict:
         """Map of learning id → its persisted embedding (unpacked), for active rows

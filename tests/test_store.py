@@ -123,6 +123,77 @@ def test_recalled_is_queryable_telemetry_not_markdown_churn(tmp_path):
     assert '"recalled": 0' in md and '"recalled": 1' not in md
 
 
+# ── reuse-credit: the second dead counter, now wired ────────────────────────
+# Field-data finding: `reused` was incremented NOWHERE, so it was a frozen-0 counter
+# (like `recalled` had been). Reuse is now credited when a SURFACED lesson is
+# independently re-derived. These pin the observable-signal contract.
+
+def _reused(store: Store, lid: str) -> int:
+    return next(r["reused"] for r in store.rows() if r["id"] == lid)
+
+
+def test_record_reused_increments_and_dedups(tmp_path):
+    s = Store(tmp_path)
+    lid = s.upsert(L())
+    assert _reused(s, lid) == 0
+    assert s.record_reused([lid, lid]) == 1     # batch-dedup: one id credited
+    assert _reused(s, lid) == 1
+    s.record_reused([lid])
+    assert _reused(s, lid) == 2                  # accumulates
+
+
+def test_rederiving_a_surfaced_lesson_credits_reuse(tmp_path):
+    """The keystone loop: a lesson is recalled (surfaced), then independently
+    re-derived (content-id collision on upsert) → reuse is credited. This is the only
+    path that originates a non-zero reused, and it's what makes the usefulness metric real."""
+    s = Store(tmp_path)
+    lid = s.upsert(L())
+    s.record_recalled([lid])                     # recall surfaced it into a session
+    assert _reused(s, lid) == 0
+    s.upsert(L())                                # SAME content distilled again → re-derivation
+    assert _reused(s, lid) == 1                  # credited as reuse
+
+
+def test_rederiving_a_never_surfaced_lesson_is_not_reuse(tmp_path):
+    """Re-deriving a lesson that was NEVER recalled is mere corroboration, not reuse —
+    you can't 'reuse' something you were never shown. Guards against inflating the signal."""
+    s = Store(tmp_path)
+    lid = s.upsert(L())
+    s.upsert(L())                                # re-derived, but never recalled
+    assert _reused(s, lid) == 0                  # NOT credited as reuse
+    # confidence still got the corroboration bump, though (that path is unchanged)
+    assert next(r["confidence"] for r in s.rows() if r["id"] == lid) > 0.5
+
+
+def test_reuse_credit_makes_corpus_health_instrumented(tmp_path):
+    """Once anything is credited reuse, corpus_health (fed via all_with_telemetry, the
+    honest analytics source) stops reporting 'reuse not instrumented' and surfaces a
+    real surfaced_never_used verdict. Markdown-only all() can't show this — telemetry
+    lives in the DB, so analytics MUST read all_with_telemetry()."""
+    from komi.engine.curator import corpus_health
+    s = Store(tmp_path)
+    lid = s.upsert(L())
+    s.record_recalled([lid])
+    assert corpus_health(s.all_with_telemetry()).get("reuse_instrumented") is False
+    s.upsert(L())                                # re-derive a surfaced lesson → reuse credited
+    h = corpus_health(s.all_with_telemetry())    # honest source: DB telemetry overlaid
+    assert h["reuse_instrumented"] is True
+    assert h["surfaced_never_used_share"] is not None   # now a real verdict, not None
+
+
+def test_all_with_telemetry_overlays_db_counters(tmp_path):
+    """all() reads content from Markdown (recalled/reused always 0 there);
+    all_with_telemetry() overlays the live DB counters so analytics isn't blind."""
+    s = Store(tmp_path)
+    lid = s.upsert(L())
+    s.record_recalled([lid])
+    s.record_reused([lid])
+    plain = next(l for l in s.all() if l.id == lid)
+    hydrated = next(l for l in s.all_with_telemetry() if l.id == lid)
+    assert plain.usage.recalled == 0 and plain.usage.reused == 0     # Markdown is blind
+    assert hydrated.usage.recalled == 1 and hydrated.usage.reused == 1  # DB overlaid
+
+
 def test_recalled_column_migrates_onto_legacy_db(tmp_path):
     """An index.db created before the recalled column must gain it on open
     (ALTER migration), not crash — derived index, must self-heal."""

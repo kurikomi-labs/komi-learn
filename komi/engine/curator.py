@@ -336,7 +336,10 @@ def curate(
         except Exception:
             embedder = None
     try:
-        learnings = store.all()
+        # Telemetry-hydrated: is_prunable's keep-if-reused guard reads usage.reused,
+        # which lives in the DB, not Markdown. Plain all() would make that guard see 0
+        # for everything and prune learnings the user actually reused.
+        learnings = store.all_with_telemetry()
     except Exception as e:
         rep.notes.append(f"could not load learnings: {e}")
         return rep

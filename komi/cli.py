@@ -208,7 +208,9 @@ def cmd_status(args) -> int:
     _p(f"  nudge_turns: {cfg.nudge_turns}   sync_hours: {cfg.pool_sync_hours}")
     try:
         s = Store(paths.personal_root(), index_path=paths.index_path())
-        learns = s.all()
+        # Telemetry-hydrated: usage counters live in the DB, not Markdown, so health
+        # analytics must read through all_with_telemetry() or it sees frozen-0 counters.
+        learns = s.all_with_telemetry()
         by_scope = {}
         for l in learns:
             by_scope[l.scope] = by_scope.get(l.scope, 0) + 1
