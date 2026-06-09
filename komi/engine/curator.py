@@ -140,6 +140,11 @@ def is_prunable(lng: Learning, *, stale_days: float, confidence_floor: float) ->
         return False
     if lng.lifecycle.state != "active":
         return False
+    # Keep anything that's been acted on. NOTE: `reused` has no engine write path yet
+    # (reuse-credit is unwired), so this guard is currently UNREACHABLE in practice —
+    # it's the correct rule for when reuse lands, not a live protection today. Until
+    # then, pruning is effectively governed by confidence + age below, which is why the
+    # confidence signal (now distiller-scored, not a constant 0.3) matters so much here.
     if lng.usage.reused > 0:
         return False
     if (lng.confidence or 0.0) >= confidence_floor:
@@ -448,18 +453,25 @@ def corpus_health(learnings: list[Learning]) -> dict:
     if n == 0:
         return {"active": 0, "stale_unused": 0, "stale_share": 0.0,
                 "never_reused": 0, "surfaced_never_used": 0,
-                "surfaced_never_used_share": 0.0, "avg_confidence": 0.0}
+                "surfaced_never_used_share": None, "reuse_instrumented": False,
+                "avg_confidence": 0.0}
+    # HONESTY GATE: the `reused` counter has no engine write path yet (it is credited
+    # only when a learning is *acted on*, and that crediting is not wired). So every
+    # reuse-derived metric below is, until reuse is instrumented, computed from a field
+    # frozen at 0 — which would make "surfaced but never used" read as a 100% uselessness
+    # verdict that is really a measurement artifact (the same trap the dead `recalled`
+    # counter set). We detect instrumentation by whether ANY active learning was ever
+    # credited reuse, and refuse to emit the share as a quality verdict when it wasn't.
+    reuse_instrumented = any((l.usage.reused or 0) > 0 for l in active)
     stale_unused = sum(
         1 for l in active
         if l.usage.reused == 0 and _age_days(l) > DEFAULT_STALE_DAYS
         and (l.confidence or 0) < 0.6
     )
     never_reused = sum(1 for l in active if l.usage.reused == 0)
-    # The sharpest "is this corpus useful?" signal, now that recalled is live:
-    # learnings recall actually SURFACED into context (recalled>0) yet were never
-    # acted on (reused==0). A high share is the fingerprint of low-signal memory —
-    # noise that keeps matching queries but never helps. (Learnings never surfaced
-    # at all are excluded: that's a recall/ranking gap, not proven-useless content.)
+    # Learnings recall actually SURFACED into context (recalled>0) yet were never acted
+    # on (reused==0). When reuse IS instrumented, a high share is the fingerprint of
+    # low-signal memory. When it is NOT, the share is meaningless (→ None), not 100%.
     surfaced = [l for l in active if (l.usage.recalled or 0) > 0]
     surfaced_never_used = sum(1 for l in surfaced if l.usage.reused == 0)
     avg_conf = sum((l.confidence or 0) for l in active) / n
@@ -469,9 +481,12 @@ def corpus_health(learnings: list[Learning]) -> dict:
         "stale_share": round(stale_unused / n, 2),
         "never_reused": never_reused,
         "surfaced_never_used": surfaced_never_used,
+        # Only a real quality verdict once reuse is wired; otherwise None ("not measurable").
         "surfaced_never_used_share": (
-            round(surfaced_never_used / len(surfaced), 2) if surfaced else 0.0
+            (round(surfaced_never_used / len(surfaced), 2) if surfaced else 0.0)
+            if reuse_instrumented else None
         ),
+        "reuse_instrumented": reuse_instrumented,
         "avg_confidence": round(avg_conf, 2),
     }
 

@@ -200,6 +200,10 @@ class Classification:
     rejected: bool = False              # secret detected → do not store at all
     generalized: Optional[Learning] = None  # rewritten global-ready form, if scope==global
     visibility: str = Visibility.SHAREABLE.value  # shareable | private (private bars global + commit)
+    # True ONLY for content the deterministic confidential floor flagged (cap table, KYC,
+    # financials). Distinct from visibility=private (which also covers merely-unvetted
+    # content). Recall quarantines on THIS, so unvetted-but-harmless craft still surfaces.
+    confidential: bool = False
 
 
 def _personal_visibility(learning: "Learning", judge, context) -> str:
@@ -237,10 +241,15 @@ def classify(
     # PRIVATE no matter what scope it lands in, so it routes to local-only storage
     # and is barred from the pool. Computed once; stamped on every outcome below.
     vis = Visibility.PRIVATE.value if floor.confidential else Visibility.SHAREABLE.value
+    # `conf` tracks the DETERMINISTIC confidential signal specifically (not bare
+    # visibility=private). Recall quarantines on this — so fail-safe-private content
+    # that is merely unvetted (not floor-flagged) still surfaces to the user's agent.
+    conf = floor.confidential
 
     if floor.secret:
         return Classification(scope=Scope.PERSONAL.value, category=learning.category,
-                              reasons=floor.reasons, rejected=True, visibility=vis)
+                              reasons=floor.reasons, rejected=True, visibility=vis,
+                              confidential=conf)
 
     # Environment-category and identity learnings are ALWAYS personal — but personal
     # scope does NOT mean "safe to commit": a user's ~/.claude (or a project's
@@ -256,7 +265,7 @@ def classify(
         if not floor.confidential:
             pvis = _personal_visibility(learning, judge, context)
         return Classification(scope=Scope.PERSONAL.value, category=learning.category,
-                              reasons=[reason], visibility=pvis)
+                              reasons=[reason], visibility=pvis, confidential=conf)
 
     if floor.blocked:
         # Has identifiers/confidential content but isn't a secret → can live as
@@ -264,7 +273,7 @@ def classify(
         # confidential forces private storage via ``vis``.)
         scope = Scope.PERSONAL.value if "pii" in floor.reasons else Scope.PROJECT.value
         return Classification(scope=scope, category=learning.category,
-                              reasons=floor.reasons, visibility=vis)
+                              reasons=floor.reasons, visibility=vis, confidential=conf)
 
     # Stage 2 — survived the floor; ask the judge whether it's truly general.
     if judge is None:

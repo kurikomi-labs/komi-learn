@@ -184,19 +184,38 @@ def test_corpus_health_counts_surfaced_never_used():
         _used("unseen", recalled=0, reused=0),   # never surfaced → not counted
     ]
     h = corpus_health(learnings)
+    # reuse IS instrumented here (one learning has reused>0), so the share is a real verdict
+    assert h["reuse_instrumented"] is True
     # 3 of 4 active were surfaced; 2 of those 3 were never used
     assert h["surfaced_never_used"] == 2
     assert h["surfaced_never_used_share"] == round(2 / 3, 2)
 
 
-def test_corpus_health_no_surfaced_is_zero_not_crash():
-    # nothing recalled yet (fresh corpus / recall not firing) → divide-by-zero guard
+def test_corpus_health_share_is_None_when_reuse_uninstrumented():
+    """THE HONESTY GATE. When nothing was ever credited reuse (reused==0 everywhere —
+    the real field state, because reuse-credit is unwired), surfaced_never_used_share
+    must be None ('not measurable'), NOT a scary 100% uselessness verdict computed from
+    a frozen counter. This is the fix for misreading the dead counter as a quality fact."""
+    learnings = [
+        _used("a", recalled=5, reused=0),
+        _used("b", recalled=3, reused=0),
+    ]
+    h = corpus_health(learnings)
+    assert h["reuse_instrumented"] is False
+    assert h["surfaced_never_used"] == 2            # the raw count is still exposed
+    assert h["surfaced_never_used_share"] is None    # but NOT as a 1.0 verdict
+
+
+def test_corpus_health_no_surfaced_is_none_not_crash():
+    # nothing recalled and nothing reused → uninstrumented → share None, no divide-by-zero
     h = corpus_health([_used("x", recalled=0, reused=0)])
     assert h["surfaced_never_used"] == 0
-    assert h["surfaced_never_used_share"] == 0.0
+    assert h["surfaced_never_used_share"] is None
+    assert h["reuse_instrumented"] is False
 
 
 def test_corpus_health_empty():
     h = corpus_health([])
     assert h["surfaced_never_used"] == 0
-    assert h["surfaced_never_used_share"] == 0.0
+    assert h["surfaced_never_used_share"] is None
+    assert h["reuse_instrumented"] is False

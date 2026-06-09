@@ -133,6 +133,13 @@ class Learning:
     # identically whether or not someone marks it private, just like usage/lifecycle).
     # Default shareable; the classifier's confidential floor moves things to private.
     visibility: str = Visibility.SHAREABLE.value
+    # True ONLY when the deterministic confidential floor (or an explicit confidentiality
+    # judgment) flagged the content as business-confidential (cap table, KYC, financials).
+    # Distinct from visibility=private, which ALSO covers merely-unvetted content. Like
+    # visibility, this is local handling policy — NOT content — so it's excluded from the
+    # id. Recall quarantines on THIS flag (true confidential), not on bare private, so a
+    # harmless unvetted technique still surfaces to the user's own agent.
+    confidential: bool = False
 
     id: str = ""
     schema: str = SCHEMA

@@ -218,8 +218,15 @@ def cmd_status(args) -> int:
         from komi.engine.curator import corpus_health
         h = corpus_health(learns)
         if h["active"]:
+            # "never reused" is only a meaningful quality signal once reuse is actually
+            # credited; until then reused is a frozen-0 counter, so report it honestly as
+            # un-instrumented rather than implying the corpus is unused.
+            if h.get("reuse_instrumented"):
+                reuse_part = f"{h['never_reused']} never reused"
+            else:
+                reuse_part = "reuse not instrumented"
             _p(f"  health:      avg-confidence {h['avg_confidence']}, "
-               f"{int(h['stale_share']*100)}% stale-unused, {h['never_reused']} never reused")
+               f"{int(h['stale_share']*100)}% stale-unused, {reuse_part}")
             if h["stale_share"] >= 0.5:
                 _p(f"               (high stale share — run `komi-learn curate` to consolidate/archive)")
     except Exception as e:

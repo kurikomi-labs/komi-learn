@@ -272,6 +272,7 @@ class Store:
                                   " ".join(lng.tags or [])])
             if safety_floor(joined).confidential:
                 lng.visibility = Visibility.PRIVATE.value
+                lng.confidential = True    # so recall quarantines it too, not just commit/pool
                 lng._normalize_visibility()   # keep the invariant: a global learning becomes project
                 self.upsert(lng)          # single-residency moves it out of the committable file
                 moved.append(lng)
@@ -487,6 +488,8 @@ class Store:
                 source TEXT, origin_root TEXT, updated_at TEXT,
                 embedding BLOB, embed_version TEXT,
                 corroboration INTEGER DEFAULT 1,
+                visibility TEXT DEFAULT 'shareable',
+                confidential INTEGER DEFAULT 0,
                 UNIQUE(id, origin_root)
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS learnings_fts USING fts5(
@@ -520,6 +523,10 @@ class Store:
             db.execute("ALTER TABLE learnings ADD COLUMN corroboration INTEGER DEFAULT 1")
         if "recalled" not in cols:
             db.execute("ALTER TABLE learnings ADD COLUMN recalled INTEGER DEFAULT 0")
+        if "visibility" not in cols:
+            db.execute("ALTER TABLE learnings ADD COLUMN visibility TEXT DEFAULT 'shareable'")
+        if "confidential" not in cols:
+            db.execute("ALTER TABLE learnings ADD COLUMN confidential INTEGER DEFAULT 0")
         db.commit()
         Store._migrate_row_identity(db)
         return db
@@ -560,15 +567,17 @@ class Store:
                     source TEXT, origin_root TEXT, updated_at TEXT,
                     embedding BLOB, embed_version TEXT,
                     corroboration INTEGER DEFAULT 1,
+                    visibility TEXT DEFAULT 'shareable',
+                    confidential INTEGER DEFAULT 0,
                     UNIQUE(id, origin_root)
                 );
                 INSERT OR IGNORE INTO learnings
                     (id, type, scope, category, title, body, trigger, tags, confidence,
                      reused, recalled, last_used, state, source, origin_root, updated_at,
-                     embedding, embed_version, corroboration)
+                     embedding, embed_version, corroboration, visibility, confidential)
                 SELECT id, type, scope, category, title, body, trigger, tags, confidence,
                      reused, recalled, last_used, state, source, origin_root, updated_at,
-                     embedding, embed_version, corroboration
+                     embedding, embed_version, corroboration, visibility, confidential
                 FROM learnings_old;
                 DROP TABLE learnings_old;
                 -- rebuild the FTS shadow + triggers (rowids changed on copy)
@@ -670,16 +679,18 @@ class Store:
             """
             INSERT INTO learnings (id, type, scope, category, title, body, trigger,
                                    tags, confidence, reused, recalled, last_used, state,
-                                   source, origin_root, updated_at, corroboration)
+                                   source, origin_root, updated_at, corroboration,
+                                   visibility, confidential)
             VALUES (:id,:type,:scope,:category,:title,:body,:trigger,:tags,
                     :confidence,:reused,:recalled,:last_used,:state,:source,:origin_root,
-                    :updated_at,:corroboration)
+                    :updated_at,:corroboration,:visibility,:confidential)
             ON CONFLICT(id, origin_root) DO UPDATE SET
                 scope=excluded.scope, category=excluded.category, title=excluded.title,
                 body=excluded.body, trigger=excluded.trigger, tags=excluded.tags,
                 confidence=excluded.confidence, state=excluded.state,
                 source=excluded.source,
-                updated_at=excluded.updated_at, corroboration=excluded.corroboration
+                updated_at=excluded.updated_at, corroboration=excluded.corroboration,
+                visibility=excluded.visibility, confidential=excluded.confidential
             """,
             {
                 "id": lng.id, "type": lng.type, "scope": lng.scope,
@@ -691,6 +702,8 @@ class Store:
                 "source": source, "origin_root": self._root_key,
                 "updated_at": lng.lifecycle.updated_at,
                 "corroboration": max(1, getattr(lng, "corroboration", 1) or 1),
+                "visibility": getattr(lng, "visibility", Visibility.SHAREABLE.value),
+                "confidential": 1 if getattr(lng, "confidential", False) else 0,
             },
         )
         self._db.commit()

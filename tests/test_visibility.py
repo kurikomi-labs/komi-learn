@@ -524,3 +524,103 @@ def test_reclassify_scans_project_root(tmp_path, monkeypatch):
     mem = mem_path.read_text(encoding="utf-8") if mem_path.exists() else ""
     assert "cap table" not in mem                          # moved out of the committable project file
     assert "cap table" in (proj / ".claude" / "komi" / "MEMORY.local.md").read_text(encoding="utf-8")
+
+
+# ── recall is CONFIDENTIAL-aware: floor-flagged life-admin is quarantined ─────
+# Field-data finding: visibility=private gated commit/pool but NOT recall, so life-admin
+# (visa/KYC/cap-table) competed head-to-head with craft in coding sessions. The quarantine
+# targets the deterministic CONFIDENTIAL flag — not bare visibility=private, which also
+# covers merely-unvetted craft that SHOULD still surface to the user's own agent.
+
+@pytest.fixture
+def no_embedder(monkeypatch):
+    """Force recall's deterministic keyword (FTS) path — no model download in CI."""
+    from komi.engine import embed as embed_mod
+    embed_mod._reset_cache_for_tests()
+    monkeypatch.setattr(embed_mod, "get_embedder", lambda: None)
+    monkeypatch.setattr(embed_mod, "available", lambda: False)
+    yield
+    embed_mod._reset_cache_for_tests()
+
+
+def _conf_learning(title, body, *, confidential, typ="semantic"):
+    """A learning with the confidential flag set explicitly (simulating the floor)."""
+    l = Learning(type=typ, category="domain-knowledge", title=title, body=body,
+                 trigger=body, tags=title.lower().split(), scope=Scope.PROJECT.value,
+                 confidence=0.6,
+                 visibility=(Visibility.PRIVATE.value if confidential
+                             else Visibility.SHAREABLE.value)).finalize()
+    l.confidential = confidential
+    return l
+
+
+def test_recall_excludes_confidential_by_default(tmp_path, no_embedder):
+    from komi.engine.recall import recall, RecallConfig
+    s = Store(tmp_path)
+    s.upsert(_conf_learning("pytest cache", "disable pytest cache in ci", confidential=False))
+    s.upsert(_conf_learning("cap table equity", "cap table equity split for the round",
+                            confidential=True))
+    # query that matches BOTH (so exclusion, not relevance, removes the confidential one)
+    block = recall(s, prompt_hint="pytest cache cap table equity", config=RecallConfig(k=8))
+    assert "pytest cache" in block
+    assert "cap table" not in block                        # confidential quarantined from coding recall
+
+
+def test_recall_includes_confidential_when_opted_in(tmp_path, no_embedder):
+    from komi.engine.recall import recall, RecallConfig
+    s = Store(tmp_path)
+    s.upsert(_conf_learning("cap table equity", "cap table equity split for the round",
+                            confidential=True))
+    block = recall(s, prompt_hint="cap table equity",
+                   config=RecallConfig(k=8, include_confidential=True))
+    assert "cap table" in block                            # explicit life-admin context surfaces it
+
+
+def test_recall_keeps_unvetted_private_craft_only_confidential_is_quarantined(tmp_path, no_embedder):
+    """THE KEY DISTINCTION. visibility=private but NOT confidential (a merely-unvetted
+    technique the judge didn't bless) must STILL surface — the quarantine is for
+    floor-flagged confidential content, not for everything tagged private. Otherwise we
+    re-break recall by dropping good craft."""
+    from komi.engine.recall import recall, RecallConfig
+    s = Store(tmp_path)
+    # private (unvetted) but NOT confidential → a normal technique
+    unvetted = Learning(type="procedural", category="tooling", title="cargo workspace test",
+                        body="cargo test workspace runs all crates", trigger="rust tests",
+                        tags=["cargo", "rust"], scope=Scope.PROJECT.value, confidence=0.6,
+                        visibility=Visibility.PRIVATE.value).finalize()
+    unvetted.confidential = False
+    s.upsert(unvetted)
+    s.upsert(_conf_learning("cap table equity", "confidential equity split", confidential=True))
+    block = recall(s, prompt_hint="cargo rust cap table equity", config=RecallConfig(k=8))
+    assert "cargo" in block.lower()                         # unvetted-but-harmless craft surfaces
+    assert "cap table" not in block                        # confidential does not
+
+
+def test_recall_cold_start_fallback_also_excludes_confidential(tmp_path, no_embedder):
+    """The highest-confidence cold-start fallback (when FTS finds nothing) must ALSO
+    honour the quarantine, or a confidential item could leak via the fallback path."""
+    from komi.engine.recall import recall, RecallConfig
+    s = Store(tmp_path)
+    s.upsert(_conf_learning("cap table equity", "confidential equity numbers", confidential=True))
+    block = recall(s, prompt_hint="zzz totally unrelated query", config=RecallConfig(k=8))
+    assert "cap table" not in block
+
+
+def test_confidential_and_visibility_persist_to_index(tmp_path):
+    """The index must carry visibility AND confidential (it didn't before) so recall
+    can filter on the confidential flag specifically."""
+    s = Store(tmp_path)
+    s.upsert(_conf_learning("secret cap", "confidential body", confidential=True))
+    s.upsert(_conf_learning("public", "shareable body", confidential=False))
+    by_title = {r["title"]: r for r in s.rows()}
+    assert by_title["secret cap"]["confidential"] == 1
+    assert by_title["secret cap"]["visibility"] == "private"
+    assert by_title["public"]["confidential"] == 0
+    assert by_title["public"]["visibility"] == "shareable"
+    # survives a reindex rebuilt from Markdown
+    s.reindex()
+    by_title2 = {r["title"]: r for r in s.rows()}
+    assert by_title2["secret cap"]["confidential"] == 1
+    assert by_title2["public"]["confidential"] == 0
+
+

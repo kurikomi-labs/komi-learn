@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .store import Store
-from .model import Scope
+from .model import Scope, Visibility
 
 
 # PAM-style boundary markers. The directive makes the trust boundary explicit so
@@ -56,6 +56,15 @@ class RecallConfig:
     max_chars: int = 6000      # budget for the whole block (keeps the prefix lean)
     include_global: bool = True
     min_confidence: float = 0.0
+    # Confidential learnings (life-admin the deterministic floor flagged: cap table,
+    # KYC, visa, financials) are quarantined from normal recall by default: they're
+    # real but they're noise for a coding session and shouldn't compete for recall
+    # slots with craft knowledge. Opt back in for an explicit "personal/life-admin"
+    # context. Defends the coding surface without deleting anything — the data still
+    # lives in the .local store. NOTE: this targets floor-flagged CONFIDENTIAL content,
+    # not bare visibility=private (which also covers merely-unvetted craft that SHOULD
+    # surface to the user's own agent).
+    include_confidential: bool = False
 
 
 def _recency_score(updated_at: str, *, half_life_days: float = 30.0) -> float:
@@ -78,6 +87,15 @@ def _col(row, key, default=0):
     except (KeyError, IndexError):
         return default
     return default if val is None else val
+
+
+def _is_confidential(row) -> bool:
+    """A learning the DETERMINISTIC confidential floor flagged (cap table, KYC,
+    financials). Recall quarantines on THIS — not on bare visibility=private, which
+    also covers merely-unvetted content that should still surface to the user's own
+    agent. Rows from a stale index that predate the column read as 0 via _col's default,
+    so a missing column never accidentally quarantines harmless craft."""
+    return bool(_col(row, "confidential", 0))
 
 
 def _rank_score(row, similarity: float) -> float:
@@ -166,6 +184,13 @@ def recall(
     # Identity (the user model) is bounded + ranked, not dumped wholesale: as the
     # profile grows forever, an unbounded block bloats the prompt and lets stale
     # persona facts outlive newer ones. Rank by confidence then recency, cap to N.
+    #
+    # Identity is deliberately NOT visibility-filtered: "prefers terse answers", "is a
+    # solo founder" etc. are usually tagged private (they're personal, not poolable) —
+    # but they ARE the whole point of local recall (how to serve THIS user). The private
+    # quarantine targets confidential *content* (life-admin facts), not the user model;
+    # private identity stays personal because it's gitignored, not because it's hidden
+    # from the user's own agent.
     identity_all = [r for r in rows if r["type"] == "identity"
                     and (r["confidence"] or 0) >= cfg.min_confidence]
     identity_all.sort(
@@ -193,6 +218,8 @@ def recall(
             continue
         if (h["confidence"] or 0) < cfg.min_confidence:
             continue
+        if not cfg.include_confidential and _is_confidential(h):
+            continue                       # quarantine floor-flagged life-admin from coding recall
         scored.append((_rank_score(h, similarity), h))
     scored.sort(key=lambda x: x[0], reverse=True)
 
@@ -212,9 +239,11 @@ def recall(
         if len(jit) >= cfg.k:
             break
 
-    # If FTS found nothing (e.g. very cold start), fall back to highest-confidence.
+    # If FTS found nothing (e.g. very cold start), fall back to highest-confidence —
+    # still honouring the confidential quarantine so the cold-start path can't leak life-admin.
     if not jit:
-        nonident = [r for r in rows if r["type"] != "identity"]
+        nonident = [r for r in rows if r["type"] != "identity"
+                    and (cfg.include_confidential or not _is_confidential(r))]
         nonident.sort(key=lambda r: (r["confidence"] or 0), reverse=True)
         jit = nonident[:cfg.k]
 
