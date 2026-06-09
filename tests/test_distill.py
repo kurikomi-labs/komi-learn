@@ -98,3 +98,57 @@ def test_malformed_llm_output_yields_no_candidates(tmp_path):
     res = distill([{"role": "user", "text": "x"}], personal_store=personal,
                   llm=Junk(), session_id="s", cwd=str(tmp_path))
     assert res.candidates == 0
+
+
+# ── confidence: the distiller self-scores instead of stamping a constant 0.3 ──
+# Regression guard for the field-data finding: every learning was born at the model
+# default 0.3 because the distill schema had no confidence field. These pin the rubric.
+
+def _conf_of(store, title):
+    return next(l.confidence for l in store.all() if l.title == title)
+
+
+def test_distiller_confidence_flows_through(tmp_path):
+    personal = Store(tmp_path / "p")
+    distill(
+        [{"role": "user", "text": "x"}], personal_store=personal,
+        llm=FakeLLM([{"type": "semantic", "category": "tooling",
+                      "title": "durable rule", "body": "a transferable invariant",
+                      "trigger": "always", "tags": ["x"], "signal": "durable-fact",
+                      "confidence": 0.75}]),
+        session_id="s", cwd=str(tmp_path),
+    )
+    assert _conf_of(personal, "durable rule") == 0.75   # honoured, not 0.3
+
+
+def test_distiller_confidence_is_clamped(tmp_path):
+    personal = Store(tmp_path / "p")
+    distill(
+        [{"role": "user", "text": "x"}], personal_store=personal,
+        llm=FakeLLM([
+            {"type": "semantic", "category": "tooling", "title": "over",
+             "body": "b", "trigger": "t", "tags": ["a"], "confidence": 1.5},
+            {"type": "semantic", "category": "tooling", "title": "under",
+             "body": "b", "trigger": "t", "tags": ["a"], "confidence": -3},
+        ]),
+        session_id="s", cwd=str(tmp_path),
+    )
+    assert _conf_of(personal, "over") == 0.9            # clamped to band ceiling
+    assert _conf_of(personal, "under") == 0.1           # clamped to band floor
+
+
+def test_missing_or_garbled_confidence_keeps_default(tmp_path):
+    personal = Store(tmp_path / "p")
+    distill(
+        [{"role": "user", "text": "x"}], personal_store=personal,
+        llm=FakeLLM([
+            {"type": "semantic", "category": "tooling", "title": "absent",
+             "body": "b", "trigger": "t", "tags": ["a"]},                 # no field
+            {"type": "semantic", "category": "tooling", "title": "garbled",
+             "body": "b", "trigger": "t", "tags": ["a"], "confidence": "high"},
+        ]),
+        session_id="s", cwd=str(tmp_path),
+    )
+    # back-compat: model default preserved when the model omits/garbles the score
+    assert _conf_of(personal, "absent") == 0.3
+    assert _conf_of(personal, "garbled") == 0.3

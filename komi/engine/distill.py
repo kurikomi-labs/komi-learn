@@ -174,6 +174,7 @@ def distill(
         lng.scope = cls.scope
         lng.category = cls.category
         lng.visibility = cls.visibility   # shareable|private → routes storage + bars pool
+        lng.confidential = cls.confidential  # floor-flagged confidential → recall quarantine
 
         if cls.scope == Scope.GLOBAL.value and cls.generalized is not None:
             # The user-specific original (if any) still belongs in a local store;
@@ -246,6 +247,22 @@ def _parse_candidates(raw: str) -> list[dict]:
 _VALID_TYPES = {"identity", "semantic", "procedural"}
 
 
+def _clamp_confidence(raw: Any) -> Optional[float]:
+    """Parse the distiller's self-scored confidence, clamped to the prompt's [0.1, 0.9]
+    band. Returns None when the model omitted/garbled it, so the caller keeps the model
+    default (0.3) — preserving backward-compat with transcripts distilled before the
+    rubric existed, rather than silently forcing a value the model never reasoned about."""
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if v != v:                          # NaN guard
+        return None
+    return max(0.1, min(0.9, v))
+
+
 def _candidate_to_learning(c: dict, *, session_id: str) -> Optional[Learning]:
     title = (c.get("title") or "").strip()
     body = (c.get("body") or "").strip()
@@ -260,6 +277,12 @@ def _candidate_to_learning(c: dict, *, session_id: str) -> Optional[Learning]:
         trigger=(c.get("trigger") or "").strip(),
         tags=[str(t).strip().lower() for t in (c.get("tags") or []) if str(t).strip()],
     )
+    # The distiller now self-scores confidence per the rubric in distill.md. Honour it
+    # (clamped); fall back to the model default only when the field is absent/garbled,
+    # so the constant-0.3 problem is fixed without breaking old/judge-less paths.
+    conf = _clamp_confidence(c.get("confidence"))
+    if conf is not None:
+        lng.confidence = conf
     sig = c.get("signal")
     if sig in {s.value for s in Signal}:
         lng.evidence.signal = sig

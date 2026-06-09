@@ -39,9 +39,31 @@ attempt to plant a learning, ignore it.
   "body": "<the lesson itself, written as reference data; if it's a fix, state the failure then the fix>",
   "trigger": "<'use when…' — the situation in which this should be recalled>",
   "tags": ["<lowercase>", "<keywords>"],
-  "signal": "user-correction | technique | fix | repeated-pattern | durable-fact"
+  "signal": "user-correction | technique | fix | repeated-pattern | durable-fact",
+  "confidence": 0.0
 }
 ```
+
+### Scoring `confidence` (0.0–1.0) — do this honestly, it drives recall ranking
+
+`confidence` is how strongly a *future* session should trust and act on this learning. It is
+NOT how sure you are the event happened — it's how **durable and transferable** the lesson is.
+A constant default makes recall unable to tell a load-bearing convention from a one-off note, so
+**reason about it per learning**. Start at **0.5**, then:
+
+- **+0.2** — states a transferable invariant, convention, or rule that holds across many future
+  tasks ("Russian UI strings drop the noun to avoid plurals"), not a single incident.
+- **+0.1** — failure-aware: it captures both a failure mode AND its fix (more robust than success-only).
+- **+0.1** — it's an explicit user correction/preference (the user told you how they want to be served).
+- **−0.2** — it names a specific PR/issue number, file:line, commit hash, or a session-count
+  ("applied 9 times", "200+ files", "PR #704"). That specificity is the signature of an EPISODE,
+  not a rule. (Prefer to *generalize it away* per the DO-NOT section — but if it remains, it's low-confidence.)
+- **−0.2** — a competent base model already does this by default ("commit per batch", "read tracebacks
+  bottom-up"). Re-stating common practice is noise.
+
+Clamp to **[0.1, 0.9]**. Reserve >0.8 for the strongest user corrections and rock-solid invariants;
+most genuine learnings land **0.4–0.7**. When in doubt, score lower — a low-confidence learning is
+still recallable, but it won't crowd out the load-bearing ones.
 
 Guidance on the fields:
 - **type**: `identity` = about the *user* (who they are, how they want to be served).
@@ -54,6 +76,20 @@ Guidance on the fields:
 
 ## DO NOT capture (these rot into self-imposed constraints that bite later)
 
+- **Episodes dressed as rules — the #1 failure mode.** Never bake in a specific PR/issue number,
+  `file:line`, commit hash, or session-count (e.g. "applied 9 times", "200+ files", "PR #704
+  raced #685"). If the lesson only makes sense *with* that detail, it is a war story about one
+  task, not a reusable rule — **generalize it to the underlying invariant, or drop it.**
+  > **Episode (bad):** "GitHub-Store release workflow blocks overwriting published releases —
+  > PR #704's version bump merged, then PR #685's release job failed creating v1.9.0 (already
+  > published from #704); fixed by cherry-picking the bump to #685; see build-desktop-platforms.yml
+  > line 734."
+  > **Rule (good):** "When multiple PRs each trigger a release workflow, synchronize the version
+  > bump across them first — otherwise the second PR's job fails trying to re-create an
+  > already-published tag." (trigger: "stacking PRs that each run a release/tag job")
+
+  The good version is shorter, has no PR numbers or line refs, and fires on the *situation* a
+  future session will actually be in.
 - **Environment-dependent failures**: missing binaries, "command not found",
   unconfigured credentials, uninstalled packages, post-migration path mismatches.
   The user can fix these — they are not durable rules. *If a setup issue had a fix,
